@@ -41,14 +41,17 @@ export function computeStats(upgrades = {}) {
   const arm = upgrades.armor  || 0;
   const fue = upgrades.fuel   || 0;
   return {
-    maxSpeed:   420 + eng * 50,    // pixels per second
-    accel:      820 + eng * 140,
-    brake:     1200 + eng * 40,
-    reverse:    280 + eng * 28,
-    grip:       0.55 + tir * 0.06,  // lower = more drift
-    turnSpeed:  3.2 + tir * 0.35,   // rad/sec
+    // Stock car ≈ 4× the prior baseline. Walls are now genuinely dangerous.
+    maxSpeed:   1700 + eng * 180,
+    accel:      3000 + eng * 480,
+    brake:      2600 + eng * 120,
+    reverse:     520 + eng * 60,
+    // Aggressively low grip + brisk turn rate so the car is twitchy from the
+    // first race. Upgrade tires to tame it.
+    grip:       0.38 + tir * 0.08,
+    turnSpeed:  3.6 + tir * 0.40,
     armor:      100 + arm * 35,
     nitroMul:   1.0 + fue * 0.25,
-    nitroBoost: 1.55 + eng * 0.06,  // top-speed mul during nitro
+    nitroBoost: 1.45 + eng * 0.05,
   };
 }

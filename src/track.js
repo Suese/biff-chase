@@ -95,10 +95,10 @@ export function generateTrack(seed) {
     });
   }
 
-  // Pickup slots — sparsely distributed along the centerline, on alternating
-  // sides. One pickup roughly every ~18 vertices = ~1100 px of track.
+  // Pickup slots — very sparse on the new fast tracks. A handful of pickups
+  // per loop, alternating sides.
   const pickupSlots = [];
-  const pickupStep = 18;
+  const pickupStep = 80;
   for (let i = 0; i < pts.length; i += pickupStep) {
     const p = pts[i];
     const prev = pts[(i - 1 + pts.length) % pts.length];

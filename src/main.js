@@ -471,8 +471,8 @@ onGameTick((dt) => {
   // so the player sees more of the road ahead.
   const myInterp = interpCars.get(myId);
   const camSpeed = myInterp ? Math.hypot(myInterp.vx, myInterp.vy) : 0;
-  const speedNorm = Math.min(1, camSpeed / 450);
-  scene.setZoom(1.25 - speedNorm * 0.4);   // 1.25 at rest → 0.85 at full tilt
+  const speedNorm = Math.min(1, camSpeed / 1700);
+  scene.setZoom(1.2 - speedNorm * 0.45);   // 1.2 at rest → 0.75 at full tilt
 
   // Draw cars + pickups + hazards using interpolated state
   const dispState = lastState;
