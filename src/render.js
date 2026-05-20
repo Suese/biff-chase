@@ -38,12 +38,16 @@ export class RallyScene {
 
   async init() {
     this.app = new Application();
+    // Force WebGL — WebGPU detection in PixiJS 8 can occasionally hang on
+    // Chromium-based browsers without explicit GPU support, and our
+    // rendering doesn't need WebGPU features.
     await this.app.init({
       background: '#0a0c10',
       antialias: true,
       resolution: window.devicePixelRatio || 1,
       autoDensity: true,
       resizeTo: window,
+      preference: 'webgl',
     });
     this.rootEl.appendChild(this.app.canvas);
 

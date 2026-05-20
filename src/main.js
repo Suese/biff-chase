@@ -48,12 +48,9 @@ if (localStorage.getItem('rallyMuted') === '1') {
   document.getElementById('mute-btn').textContent = '🔇';
 }
 
-await scene.init();
-
-// Drain the scheduler each frame
-scene.onTick(() => tickClock());
-
-// ---- Lobby wiring ----
+// Wire the lobby IMMEDIATELY — never block these handlers on the renderer
+// initialising. (PixiJS init can be slow on first WebGPU detection, and if it
+// rejects/hangs we still want the lobby to be interactive.)
 ui.bindLobby({
   onHost: () => startHost(),
   onJoin: () => startClient(),
@@ -74,11 +71,25 @@ ui.bindShop({
   onReady: () => sendAction({ name: 'shop_ready' }),
 });
 
+// Initialise the renderer in the background. Surface any failure into the
+// lobby status so it never disappears silently.
+let _sceneReady = false;
+const _sceneReadyPromise = scene.init().then(() => {
+  _sceneReady = true;
+  scene.onTick(() => tickClock());
+}).catch(err => {
+  console.error('Renderer init failed', err);
+  ui.setLobbyStatus('Renderer failed to start: ' + (err?.message || err));
+});
+
 async function startHost() {
   myName = ui.readNameInput();
   if (!myName) { ui.setLobbyStatus('Enter your name first.'); return; }
   ui.persistName(myName);
   ui.setLobbyStatus('Connecting to peer network...');
+  // Make sure the renderer is up before we actually enter a race — the lobby
+  // itself is fine without it.
+  await _sceneReadyPromise;
   host = new HostNet();
   try {
     myId = await host.start();
@@ -139,6 +150,7 @@ async function startClient() {
   if (!myName) { ui.setLobbyStatus('Enter your name first.'); return; }
   ui.persistName(myName);
   ui.setLobbyStatus('Connecting...');
+  await _sceneReadyPromise;
 
   client = new ClientNet();
   try {
