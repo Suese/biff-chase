@@ -234,9 +234,10 @@ function applyState(state) {
   // Rebuild the scene if the track changed. State sometimes carries only the
   // seed (bandwidth optimisation) — in that case the receiver should already
   // have the full track from an earlier snapshot.
-  if (state.track && state.track.bounds && (!scene._currentTrack || scene._currentTrack.seed !== state.track.seed)) {
+  if (state.track && state.track.bounds && _sceneReady && (!scene._currentTrack || scene._currentTrack.seed !== state.track.seed)) {
     scene.buildBackground(state.track.bounds);
     scene.buildTrack(state.track);
+    scene.resetCamera();   // snap to the new race's spawn instead of panning from (0,0)
   } else if (state.track && !state.track.bounds && scene._currentTrack && scene._currentTrack.seed !== state.track.seed) {
     // We have a new seed but no payload — client missed the bootstrap snapshot.
     // The next periodic snapshot from the host won't include it either, so
@@ -313,6 +314,7 @@ function applyEvent(ev) {
     case 'log': ui.log(ev.text, ev.kind || ''); break;
     case 'race_start':
       ui.log(`Race ${ev.raceNumber} — track ${ev.seed.toString(16).slice(0, 6)}`);
+      showControlsHint();
       break;
     case 'race_go':
       sfx.countdown(0);
@@ -355,6 +357,26 @@ function applyEvent(ev) {
   }
 }
 
+// Show the controls hint at race start and fade it out after a few seconds
+// once the driver has touched any key. If they never press a key, leave it up
+// — they need it more than anyone.
+let _controlsHintHidden = false;
+function showControlsHint() {
+  const el = document.getElementById('controls-hint');
+  if (!el) return;
+  el.classList.remove('fading');
+  _controlsHintHidden = false;
+}
+window.addEventListener('keydown', () => {
+  if (_controlsHintHidden) return;
+  const el = document.getElementById('controls-hint');
+  if (!el) return;
+  scheduleAfter(2200, () => {
+    el.classList.add('fading');
+    _controlsHintHidden = true;
+  });
+});
+
 function angleDelta(a, b) {
   let d = b - a;
   while (d > Math.PI) d -= Math.PI * 2;
@@ -368,29 +390,10 @@ onGameTick((dt) => {
   if (!lastState) return;
   if (!_sceneReady) return;     // canvas isn't up yet — skip rendering
 
-  // Local input extrapolation for my own car (cheap dead-reckon)
-  if (myId && interpCars.has(myId)) {
-    const t = interpCars.get(myId);
-    const input = inputTracker.getState();
-    const accel = input.up ? 380 : (input.down ? -260 : 0);
-    const turn = (input.left ? -1 : 0) + (input.right ? 1 : 0);
-    if (t.alive) {
-      const fx = Math.cos(t.a), fy = Math.sin(t.a);
-      t.vx += fx * accel * dt;
-      t.vy += fy * accel * dt;
-      // gentle drag
-      t.vx *= Math.pow(0.95, dt * 60);
-      t.vy *= Math.pow(0.95, dt * 60);
-      const speed = Math.hypot(t.vx, t.vy);
-      const speedNorm = Math.min(1, speed / 320);
-      t.a += turn * 3.0 * (0.3 + Math.sqrt(speedNorm) * 0.7) * dt;
-      t.x += t.vx * dt;
-      t.y += t.vy * dt;
-    }
-  }
-  // For other cars: dead-reckon along their last velocity vector
-  for (const [id, t] of interpCars) {
-    if (id === myId) continue;
+  // Dead-reckon all cars by their last reported velocity. This carries the
+  // visual between 20 Hz host snapshots so motion is smooth. The math matches
+  // the host's setVelocity-based controller (we're just integrating forward).
+  for (const t of interpCars.values()) {
     if (t.alive) {
       t.x += t.vx * dt;
       t.y += t.vy * dt;

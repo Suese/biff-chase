@@ -84,15 +84,23 @@ export class RallyScene {
 
   _onTick(ticker) {
     const dt = ticker.deltaMS / 1000;
-    // Camera smoothing
+    // Camera smoothing — but on the first frame after a camera target appears,
+    // snap there so we don't see the world shoot in from (0,0).
     if (this._cameraTarget) {
-      const k = 1 - Math.pow(0.001, dt);
-      this.camera.x += (this._cameraTarget.x - this.camera.x) * k;
-      this.camera.y += (this._cameraTarget.y - this.camera.y) * k;
+      if (!this._cameraSet) {
+        this.camera.x = this._cameraTarget.x;
+        this.camera.y = this._cameraTarget.y;
+        this._cameraSet = true;
+      } else {
+        const k = 1 - Math.pow(0.001, dt);
+        this.camera.x += (this._cameraTarget.x - this.camera.x) * k;
+        this.camera.y += (this._cameraTarget.y - this.camera.y) * k;
+      }
     }
     this.camera.zoom += (this.camera.targetZoom - this.camera.zoom) * (1 - Math.pow(0.001, dt));
-    const w = this.app.renderer.width / (window.devicePixelRatio || 1);
-    const h = this.app.renderer.height / (window.devicePixelRatio || 1);
+    // app.screen is the CSS-pixel viewport, regardless of autoDensity/resolution.
+    const w = this.app.screen.width;
+    const h = this.app.screen.height;
     this.world.scale.set(this.camera.zoom);
     this.world.position.set(w / 2 - this.camera.x * this.camera.zoom, h / 2 - this.camera.y * this.camera.zoom);
 
@@ -117,6 +125,7 @@ export class RallyScene {
   }
 
   setCameraTarget(x, y) { this._cameraTarget = { x, y }; }
+  resetCamera() { this._cameraSet = false; }
   setZoom(z) { this.camera.targetZoom = z; }
 
   // ---- Background tiling — pseudo-asphalt with subtle noise.

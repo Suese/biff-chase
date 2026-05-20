@@ -17,7 +17,6 @@ html, body {
 }
 #canvas-root canvas {
   display: block;
-  width: 100%; height: 100%;
 }
 
 .hidden { display: none !important; }
@@ -254,6 +253,43 @@ button.primary:hover:not(:disabled) {
 }
 #speed-text { font-size: 36px; color: #ffce3d; font-weight: 700; line-height: 1; }
 #speed-label { font-size: 10px; color: #8b94a4; letter-spacing: 2px; margin-top: 4px; }
+
+#controls-hint {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 56px;
+  background: rgba(10,12,18,0.85);
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: #c0c5d0;
+  opacity: 1;
+  transition: opacity 0.6s ease;
+  pointer-events: none;
+  text-align: left;
+}
+#controls-hint.fading { opacity: 0; }
+#controls-hint .ctl-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0;
+}
+#controls-hint kbd {
+  background: #1a1d24;
+  border: 1px solid #2a2f3a;
+  border-bottom-width: 2px;
+  color: #ffce3d;
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-size: 10px;
+  padding: 2px 5px;
+  border-radius: 3px;
+  min-width: 14px;
+  text-align: center;
+}
 
 #lap-counter {
   position: absolute;

@@ -96,9 +96,12 @@ export function refreshCarStats(carBody, upgrades) {
   carBody.health = stats.armor;
 }
 
-// Apply input to a car body for one fixed step. Body's "facing" direction is
-// the +Y axis in its local frame (Matter rotates -Y by default at angle 0, but
-// we treat angle 0 = facing +X for clarity with track tangent vectors).
+// Apply input to a car body for one fixed step.
+//
+// We bypass Matter.js's force integrator for the car's *driven* motion —
+// directly setting velocity each step is far easier to reason about for an
+// arcade controller. Matter still handles wall collisions (which modify
+// velocity as part of the next Engine.update).
 export function stepCar(body, dt) {
   if (!body.alive) {
     body.respawnIn = Math.max(0, body.respawnIn - dt);
@@ -111,58 +114,53 @@ export function stepCar(body, dt) {
   const nx = -fy;       // body-left normal
   const ny =  fx;
 
-  // Forward speed (signed projection onto facing)
-  const vx = body.velocity.x;
-  const vy = body.velocity.y;
-  const fwdSpeed = vx * fx + vy * fy;
-  const latSpeed = vx * nx + vy * ny;
+  // Decompose current velocity into forward + lateral components.
+  let fwdSpeed = body.velocity.x * fx + body.velocity.y * fy;
+  let latSpeed = body.velocity.x * nx + body.velocity.y * ny;
 
-  // ---- Thrust / brake / reverse
   const oiledMul = body.oiled > 0 ? 0.4 : 1.0;
   const boostMul = body.boost > 0 ? stats.nitroBoost : 1.0;
   const maxSpeed = stats.maxSpeed * boostMul;
 
-  let accel = 0;
+  // ---- Throttle / brake / reverse — apply as direct velocity change.
   if (input.up && !input.down) {
-    // Engine push, capped at maxSpeed forward
-    if (fwdSpeed < maxSpeed) accel += stats.accel * oiledMul;
-  }
-  if (input.down && !input.up) {
-    if (fwdSpeed > -stats.reverse) accel -= stats.brake * 0.6 * oiledMul;
+    fwdSpeed += stats.accel * oiledMul * dt;
+    if (fwdSpeed > maxSpeed) fwdSpeed = maxSpeed;
+  } else if (input.down && !input.up) {
+    fwdSpeed -= stats.brake * 0.6 * oiledMul * dt;
+    if (fwdSpeed < -stats.reverse) fwdSpeed = -stats.reverse;
+  } else {
+    // Engine braking — slow gentle deceleration when off-throttle
+    fwdSpeed *= Math.pow(0.985, dt * 60);
   }
   if (input.brake) {
-    // Hand-brake: dampen forward speed strongly and reduce lateral friction so
-    // we drift.
-    accel -= Math.sign(fwdSpeed) * stats.brake * 0.6;
-  }
-  // Apply thrust along facing
-  if (accel !== 0) {
-    Matter.Body.applyForce(body, body.position, { x: fx * accel * body.mass * dt, y: fy * accel * body.mass * dt });
+    // Handbrake: heavy deceleration
+    fwdSpeed *= Math.pow(0.88, dt * 60);
   }
 
-  // ---- Steering: turn rate scales with sqrt(|fwdSpeed|/maxSpeed) so we can't
-  // pivot in place but we still turn well at low speed.
-  const speedNorm = Math.min(1, Math.abs(fwdSpeed) / stats.maxSpeed);
-  const steerAuthority = 0.25 + 0.75 * Math.sqrt(speedNorm);
-  let steer = 0;
-  if (input.left)  steer -= 1;
-  if (input.right) steer += 1;
-  // Reverse-steer inversion: when reversing the steering should still feel like
-  // turning the wheel, not flipping it.
-  if (fwdSpeed < -10) steer *= -1;
-  const turnRate = steer * stats.turnSpeed * steerAuthority * oiledMul;
-  Matter.Body.setAngularVelocity(body, turnRate * dt + body.angularVelocity * 0.6);
-
-  // ---- Lateral friction (the magic that keeps the car from sliding sideways).
-  // Drift mode (handbrake) reduces grip; oil also reduces grip.
+  // ---- Lateral friction — kill sideways velocity so the car doesn't drift
+  // forever. Handbrake / oil reduces grip so the car DOES slide.
   let grip = stats.grip;
   if (input.brake) grip *= 0.35;
   if (body.oiled > 0) grip *= 0.4;
-  const killLat = Math.min(1, grip);
-  // New velocity = forward component preserved + (lateral component scaled down)
-  const newVx = (fwdSpeed) * fx + (latSpeed * (1 - killLat)) * nx;
-  const newVy = (fwdSpeed) * fy + (latSpeed * (1 - killLat)) * ny;
-  Matter.Body.setVelocity(body, { x: newVx, y: newVy });
+  // Per-step lateral decay — grip 0.85 ≈ near-instant lock; 0.3 ≈ slidey.
+  const latDecay = Math.min(1, grip * dt * 12);
+  latSpeed *= (1 - latDecay);
+
+  // Recompose into world-space velocity.
+  Matter.Body.setVelocity(body, {
+    x: fwdSpeed * fx + latSpeed * nx,
+    y: fwdSpeed * fy + latSpeed * ny,
+  });
+
+  // ---- Steering: turn rate scales with sqrt(|fwdSpeed|/maxSpeed) so the car
+  // can't spin in place at zero speed but turns well as it moves.
+  const speedNorm = Math.min(1, Math.abs(fwdSpeed) / stats.maxSpeed);
+  const steerAuthority = 0.25 + 0.75 * Math.sqrt(speedNorm);
+  let steer = (input.left ? -1 : 0) + (input.right ? 1 : 0);
+  if (fwdSpeed < -10) steer *= -1;   // reverse-steer feels natural
+  // Matter's angularVelocity is in rad/step; turnSpeed is rad/sec.
+  Matter.Body.setAngularVelocity(body, steer * stats.turnSpeed * steerAuthority * oiledMul * dt);
 
   // ---- Drain boost / oil timers
   if (body.boost > 0) body.boost = Math.max(0, body.boost - dt);
