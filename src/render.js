@@ -561,24 +561,56 @@ export class RallyScene {
       plate.position.set(p.cx, 0.05, p.cy);
       this.trackGroup.add(plate);
 
-      // Walls baked into the tile — one per side that ISN'T another road.
-      // Each side is a 4 m wall along the tile's outer edge.
-      const sides = [
-        { has: MASK_N_BIT, dx: 0,    dz: -HALF, rotY: 0,             nudge: 'z' },
-        { has: MASK_E_BIT, dx: HALF, dz: 0,    rotY: Math.PI / 2,    nudge: 'x' },
-        { has: MASK_S_BIT, dx: 0,    dz: HALF, rotY: 0,             nudge: 'z' },
-        { has: MASK_W_BIT, dx:-HALF, dz: 0,    rotY: Math.PI / 2,    nudge: 'x' },
-      ];
-      for (const s of sides) {
-        if ((p.mask & s.has) !== 0) continue;  // neighbour is road, no wall
-        const wall = new THREE.Mesh(wallGeom, ROAD_WALL_MAT);
-        wall.position.set(p.cx + s.dx, 0.5, p.cy + s.dz);
-        wall.rotation.y = s.rotY;
+      // Walls baked into the tile. For CORNER tiles (2 adjacent road
+      // neighbours) we emit ONE 45° diagonal wall connecting the midpoints
+      // of the two missing sides — visible chamfer on every road bend.
+      // Other tile types use full-length axial walls on missing sides.
+      const n = (p.mask & MASK_N_BIT) !== 0;
+      const e = (p.mask & MASK_E_BIT) !== 0;
+      const s = (p.mask & MASK_S_BIT) !== 0;
+      const w = (p.mask & MASK_W_BIT) !== 0;
+      const count = (n + e + s + w);
+      const cornerAdjacent = count === 2 &&
+        ((n && e) || (e && s) || (s && w) || (w && n));
+
+      if (cornerAdjacent) {
+        let ax, ay, bx, by;
+        if (n && e)       { ax = p.cx;        ay = p.cy + HALF; bx = p.cx - HALF; by = p.cy;        }
+        else if (e && s)  { ax = p.cx - HALF; ay = p.cy;        bx = p.cx;        by = p.cy - HALF; }
+        else if (s && w)  { ax = p.cx;        ay = p.cy - HALF; bx = p.cx + HALF; by = p.cy;        }
+        else /* w && n */ { ax = p.cx + HALF; ay = p.cy;        bx = p.cx;        by = p.cy + HALF; }
+        const dx = bx - ax, dy = by - ay;
+        const len = Math.hypot(dx, dy);
+        const mx = (ax + bx) / 2, my = (ay + by) / 2;
+        const angle = Math.atan2(dy, dx);
+        const diagWallGeom = new THREE.BoxGeometry(len, 0.7, 0.30);
+        const diagTopGeom  = new THREE.BoxGeometry(len, 0.10, 0.34);
+        const wall = new THREE.Mesh(diagWallGeom, ROAD_WALL_MAT);
+        wall.position.set(mx, 0.5, my);
+        wall.rotation.y = -angle;
         this.trackGroup.add(wall);
-        const top = new THREE.Mesh(wallTopG, ROAD_WALL_STRIPE_MAT);
-        top.position.set(p.cx + s.dx, 0.92, p.cy + s.dz);
-        top.rotation.y = s.rotY;
+        const top = new THREE.Mesh(diagTopGeom, ROAD_WALL_STRIPE_MAT);
+        top.position.set(mx, 0.92, my);
+        top.rotation.y = -angle;
         this.trackGroup.add(top);
+      } else {
+        const sides = [
+          { has: MASK_N_BIT, dx: 0,    dz: -HALF, rotY: 0 },
+          { has: MASK_E_BIT, dx: HALF, dz: 0,    rotY: Math.PI / 2 },
+          { has: MASK_S_BIT, dx: 0,    dz: HALF, rotY: 0 },
+          { has: MASK_W_BIT, dx:-HALF, dz: 0,    rotY: Math.PI / 2 },
+        ];
+        for (const s of sides) {
+          if ((p.mask & s.has) !== 0) continue;
+          const wall = new THREE.Mesh(wallGeom, ROAD_WALL_MAT);
+          wall.position.set(p.cx + s.dx, 0.5, p.cy + s.dz);
+          wall.rotation.y = s.rotY;
+          this.trackGroup.add(wall);
+          const top = new THREE.Mesh(wallTopG, ROAD_WALL_STRIPE_MAT);
+          top.position.set(p.cx + s.dx, 0.92, p.cy + s.dz);
+          top.rotation.y = s.rotY;
+          this.trackGroup.add(top);
+        }
       }
     }
   }

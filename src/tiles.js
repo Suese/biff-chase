@@ -119,23 +119,39 @@ export function dilateRoadCells(centerCells, radiusFor) {
   return { set, cells, widths };
 }
 
-// Wall segments from cell adjacency: every road-tile side with a non-road
-// neighbour becomes a 4m wall along that edge. Used by physics + renderer.
+// Wall segments derived from tile adjacency. For most cells: each side
+// without a road neighbour becomes a 4 m AXIAL wall (kind: 'axial').
+// For CORNER cells — exactly two adjacent road neighbours — the two
+// perpendicular straight walls are replaced by a SINGLE 45° diagonal wall
+// (kind: 'diag') that cuts the inner corner. Result: every road bend has
+// a chamfered inside edge instead of a step.
 export function wallSegmentsFromTiles(placements) {
+  const H = CELL_SIZE / 2;
   const walls = [];
   for (const p of placements) {
-    if ((p.mask & MASK_N) === 0) {
-      walls.push({ x: p.cx,                      y: p.cy - CELL_SIZE / 2, len: CELL_SIZE, axis: 'x', side: 'N' });
+    const n = (p.mask & MASK_N) !== 0;
+    const e = (p.mask & MASK_E) !== 0;
+    const s = (p.mask & MASK_S) !== 0;
+    const w = (p.mask & MASK_W) !== 0;
+    const count = (n + e + s + w);
+    const isCornerAdjacent = count === 2 &&
+      ((n && e) || (e && s) || (s && w) || (w && n));
+
+    if (isCornerAdjacent) {
+      // Diagonal wall connecting the midpoints of the two MISSING sides.
+      let ax, ay, bx, by;
+      if (n && e)       { ax = p.cx;     ay = p.cy + H; bx = p.cx - H; by = p.cy;     }
+      else if (e && s)  { ax = p.cx - H; ay = p.cy;     bx = p.cx;     by = p.cy - H; }
+      else if (s && w)  { ax = p.cx;     ay = p.cy - H; bx = p.cx + H; by = p.cy;     }
+      else /* w && n */ { ax = p.cx + H; ay = p.cy;     bx = p.cx;     by = p.cy + H; }
+      walls.push({ kind: 'diag', ax, ay, bx, by });
+      continue;
     }
-    if ((p.mask & MASK_E) === 0) {
-      walls.push({ x: p.cx + CELL_SIZE / 2,      y: p.cy,                  len: CELL_SIZE, axis: 'y', side: 'E' });
-    }
-    if ((p.mask & MASK_S) === 0) {
-      walls.push({ x: p.cx,                      y: p.cy + CELL_SIZE / 2, len: CELL_SIZE, axis: 'x', side: 'S' });
-    }
-    if ((p.mask & MASK_W) === 0) {
-      walls.push({ x: p.cx - CELL_SIZE / 2,      y: p.cy,                  len: CELL_SIZE, axis: 'y', side: 'W' });
-    }
+
+    if (!n) walls.push({ kind: 'axial', x: p.cx,     y: p.cy - H, len: CELL_SIZE, axis: 'x', side: 'N' });
+    if (!e) walls.push({ kind: 'axial', x: p.cx + H, y: p.cy,     len: CELL_SIZE, axis: 'y', side: 'E' });
+    if (!s) walls.push({ kind: 'axial', x: p.cx,     y: p.cy + H, len: CELL_SIZE, axis: 'x', side: 'S' });
+    if (!w) walls.push({ kind: 'axial', x: p.cx - H, y: p.cy,     len: CELL_SIZE, axis: 'y', side: 'W' });
   }
   return walls;
 }

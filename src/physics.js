@@ -39,25 +39,42 @@ export function createWorld() {
   return engine;
 }
 
-// Build Matter static bodies for the track's wall segments. wallSegments
-// is the array on the track object (already filtered to "present" walls).
-// Each segment has { x, y, len, axis } in metres.
+// Build Matter static bodies for the track's wall segments. Two kinds:
+//   axial — { kind: 'axial', x, y, len, axis: 'x'|'y' } (4 m axis-aligned)
+//   diag  — { kind: 'diag',  ax, ay, bx, by }          (45° chamfer)
 export function buildWallBodies(world, wallSegments) {
   const bodies = [];
   const thickness = 0.35;
   for (const w of wallSegments) {
-    let bw, bh;
-    if (w.axis === 'x') { bw = w.len; bh = thickness; }
-    else                { bw = thickness; bh = w.len; }
-    const body = Matter.Bodies.rectangle(w.x, w.y, bw, bh, {
-      isStatic: true,
-      friction: 0,
-      frictionStatic: 0,
-      restitution: 0.1,
-      label: 'wall',
-      slop: 0.005,
-    });
-    bodies.push(body);
+    if (w.kind === 'diag') {
+      const dx = w.bx - w.ax;
+      const dy = w.by - w.ay;
+      const len = Math.hypot(dx, dy);
+      const angle = Math.atan2(dy, dx);
+      const body = Matter.Bodies.rectangle(
+        (w.ax + w.bx) / 2,
+        (w.ay + w.by) / 2,
+        len, thickness, {
+          isStatic: true, angle,
+          friction: 0, frictionStatic: 0, restitution: 0.1,
+          label: 'wall', slop: 0.005,
+        },
+      );
+      bodies.push(body);
+    } else {
+      let bw, bh;
+      if (w.axis === 'x') { bw = w.len; bh = thickness; }
+      else                { bw = thickness; bh = w.len; }
+      const body = Matter.Bodies.rectangle(w.x, w.y, bw, bh, {
+        isStatic: true,
+        friction: 0,
+        frictionStatic: 0,
+        restitution: 0.1,
+        label: 'wall',
+        slop: 0.005,
+      });
+      bodies.push(body);
+    }
   }
   Matter.Composite.add(world, bodies);
   return bodies;
