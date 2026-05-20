@@ -28,8 +28,10 @@ export function generateTrack(seed) {
   // One Chaikin pass — barely rounds the polygon corners, keeps the angles.
   let pts = chaikinClosed(ctrl);
 
-  // Resample at coarser interval.
-  pts = resampleByArc(pts, 60);
+  // Fine resampling means each turn becomes many small bends — the offset
+  // polyline (used by the renderer to build the road ring) is much smoother
+  // and the miter-limit clamp almost never fires.
+  pts = resampleByArc(pts, 36);
 
   // Per-vertex track width with smooth variation. Base is wide enough that a
   // 4-wide starting grid (≈ 180 px including car widths + gaps) fits in any
@@ -120,7 +122,7 @@ export function generateTrack(seed) {
   // Pickup slots — very sparse on the new fast tracks. A handful of pickups
   // per loop, alternating sides.
   const pickupSlots = [];
-  const pickupStep = 80;
+  const pickupStep = 130;     // tuned for the finer-resampled centerline
   for (let i = 0; i < pts.length; i += pickupStep) {
     const p = pts[i];
     const prev = pts[(i - 1 + pts.length) % pts.length];
