@@ -161,27 +161,26 @@ export class RallyScene {
     this.pickupLayer.removeChildren();
     this.pickupGfx.clear();
 
+    // Road surface as a CSG union — each segment's trapezoid filled with the
+    // same road colour, overlaps fuse naturally into a clean shape regardless
+    // of corner sharpness or 180° hairpins.
     const trackFill = new Graphics();
-    // Combine outer + reversed inner into one closed polygon
-    const pts = [...track.outer, ...track.inner.slice().reverse()];
-    trackFill.beginPath();
-    trackFill.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) trackFill.lineTo(pts[i].x, pts[i].y);
-    trackFill.closePath();
-    trackFill.fill({ color: 0x2a2f3a });
+    for (const t of track.tiles) {
+      trackFill
+        .poly([t.al.x, t.al.y, t.bl.x, t.bl.y, t.br.x, t.br.y, t.ar.x, t.ar.y])
+        .fill({ color: 0x2a2f3a });
+    }
 
-    // Curb edges — alternating red/white along inner & outer
+    // Per-tile edge curbs (drawn ONLY along the outgoing-segment perpendicular
+    // at each end). They overlap at corners which is fine visually.
     const curb = new Graphics();
-    const drawCurb = (loop, off) => {
-      for (let i = 0; i < loop.length; i++) {
-        const a = loop[i];
-        const b = loop[(i + 1) % loop.length];
-        const color = ((i + off) % 2 === 0) ? 0xff3a3a : 0xf3f3f3;
-        curb.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ color, width: 5, alpha: 0.85 });
-      }
-    };
-    drawCurb(track.inner, 0);
-    drawCurb(track.outer, 1);
+    for (let i = 0; i < track.tiles.length; i++) {
+      const t = track.tiles[i];
+      const colorL = (i % 2 === 0) ? 0xff3a3a : 0xf3f3f3;
+      const colorR = (i % 2 === 0) ? 0xf3f3f3 : 0xff3a3a;
+      curb.moveTo(t.al.x, t.al.y).lineTo(t.bl.x, t.bl.y).stroke({ color: colorL, width: 4, alpha: 0.7 });
+      curb.moveTo(t.ar.x, t.ar.y).lineTo(t.br.x, t.br.y).stroke({ color: colorR, width: 4, alpha: 0.7 });
+    }
 
     // Center dashed stripe
     const stripe = new Graphics();

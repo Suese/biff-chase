@@ -53,20 +53,42 @@ export function generateTrack(seed) {
     widths[idxBack] = Math.max(widths[idxBack], startMin);
   }
 
+  // CSG-style track: a UNION of per-segment trapezoid tiles. Each tile is
+  // perpendicular to its own segment (no bisector), so sharp turns just have
+  // overlapping tiles where neighbours meet — no offset-polyline blow-up.
+  const tiles = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    const nx = -uy;        // left-perpendicular in math coords
+    const ny =  ux;
+    const wA = widths[i] / 2;
+    const wB = widths[(i + 1) % widths.length] / 2;
+    tiles.push({
+      al: { x: a.x + nx * wA, y: a.y + ny * wA },
+      ar: { x: a.x - nx * wA, y: a.y - ny * wA },
+      bl: { x: b.x + nx * wB, y: b.y + ny * wB },
+      br: { x: b.x - nx * wB, y: b.y - ny * wB },
+      ax: a.x, ay: a.y,
+      bx: b.x, by: b.y,
+      ux, uy, nx, ny,
+      len, wA, wB,
+    });
+  }
+
+  // Inner/outer offset polylines kept around for the minimap (visual only;
+  // they have artifacts at sharp corners but the minimap is forgiving).
   const inner = [];
   const outer = [];
   for (let i = 0; i < pts.length; i++) {
-    const p = pts[i];
-    const prev = pts[(i - 1 + pts.length) % pts.length];
-    const next = pts[(i + 1) % pts.length];
-    const tx = next.x - prev.x;
-    const ty = next.y - prev.y;
-    const len = Math.hypot(tx, ty) || 1;
-    const nx = -ty / len;
-    const ny = tx / len;
-    const w = widths[i] / 2;
-    inner.push({ x: p.x + nx * w, y: p.y + ny * w });
-    outer.push({ x: p.x - nx * w, y: p.y - ny * w });
+    const t = tiles[i];
+    inner.push({ x: t.al.x, y: t.al.y });
+    outer.push({ x: t.ar.x, y: t.ar.y });
   }
 
   // Start/finish: take the segment between pts[0] and pts[1] perpendicular,
@@ -112,15 +134,17 @@ export function generateTrack(seed) {
     pickupSlots.push({ x: p.x + nx * w, y: p.y + ny * w });
   }
 
-  // World bounds for camera + minimap
+  // World bounds for camera + minimap — covers every tile corner.
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of outer.concat(inner)) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
+  for (const t of tiles) {
+    for (const c of [t.al, t.ar, t.bl, t.br]) {
+      if (c.x < minX) minX = c.x;
+      if (c.y < minY) minY = c.y;
+      if (c.x > maxX) maxX = c.x;
+      if (c.y > maxY) maxY = c.y;
+    }
   }
-  const pad = 100;
+  const pad = 120;
   const bounds = {
     minX: minX - pad, minY: minY - pad,
     maxX: maxX + pad, maxY: maxY + pad,
@@ -130,6 +154,7 @@ export function generateTrack(seed) {
     seed,
     centerline: pts,
     widths,
+    tiles,
     inner,
     outer,
     start: { x: start.x, y: start.y, tx: startTangent.x, ty: startTangent.y, nx: startNormal.x, ny: startNormal.y, width: startWidth },

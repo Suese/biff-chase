@@ -8,12 +8,10 @@
 
 import Matter from 'matter-js';
 import {
-  createWorld, buildTrackBodies, createCarBody, refreshCarStats,
-  stepCar, dealDamage, respawnCar, carSnapshot, applyCarSnapshot,
+  createWorld, createCarBody, refreshCarStats,
+  stepCar, clampToTrack, dealDamage, respawnCar, carSnapshot, applyCarSnapshot,
   FIXED_DT, CAR_LENGTH, PICKUP_R, MINE_R, OIL_R,
 } from './physics.js';
-// Matter.Events for collision callbacks
-import 'matter-js';
 import { generateTrack, gridSpawnPositions } from './track.js';
 import { ITEMS, rollPickupKind } from './items.js';
 import { UPGRADES, computeStats } from './upgrades.js';
@@ -102,36 +100,6 @@ export class GameRoom {
     this.emitEvent({ type: 'log', text: `${name} joined.` });
   }
 
-  // ---- Matter collision handlers
-  _onCollisionStart(ev) {
-    for (const pair of ev.pairs) {
-      const car = pair.bodyA.label === 'car' ? pair.bodyA : (pair.bodyB.label === 'car' ? pair.bodyB : null);
-      const wall = pair.bodyA.label === 'wall' ? pair.bodyA : (pair.bodyB.label === 'wall' ? pair.bodyB : null);
-      if (!car || !wall) continue;
-      // Damage scales with closing velocity along the contact normal.
-      const speed = Math.hypot(car.velocity.x, car.velocity.y);
-      const dmg = Math.min(20, speed * 60 * 0.05);  // body.velocity is per-step → ×60 for px/sec
-      if (dmg > 1) dealDamage(car, dmg);
-      const pt = pair.collision?.supports?.[0] || { x: car.position.x, y: car.position.y };
-      this.emitEvent({ type: 'bump', playerId: car.ownerId, x: pt.x, y: pt.y, intensity: Math.min(1, speed * 60 / 240) });
-    }
-  }
-  _onCollisionActive(ev) {
-    const now = Date.now();
-    for (const pair of ev.pairs) {
-      const car = pair.bodyA.label === 'car' ? pair.bodyA : (pair.bodyB.label === 'car' ? pair.bodyB : null);
-      const wall = pair.bodyA.label === 'wall' ? pair.bodyA : (pair.bodyB.label === 'wall' ? pair.bodyB : null);
-      if (!car || !wall) continue;
-      const last = this._lastGrindMs.get(car.ownerId) || 0;
-      if (now - last < 90) continue;
-      this._lastGrindMs.set(car.ownerId, now);
-      const speed = Math.hypot(car.velocity.x, car.velocity.y) * 60;
-      if (speed < 60) continue;     // no sparks at a crawl
-      const pt = pair.collision?.supports?.[0] || { x: car.position.x, y: car.position.y };
-      this.emitEvent({ type: 'grind', playerId: car.ownerId, x: pt.x, y: pt.y, intensity: Math.min(1, speed / 280) });
-    }
-  }
-
   // Spawn a single car at the back of the current grid. Used by beginRace and
   // by addPlayer for late joiners.
   _spawnCarForPlayer(playerId, playerName) {
@@ -194,15 +162,8 @@ export class GameRoom {
       this.engine = null;
     }
     this.engine = createWorld();
-    buildTrackBodies(this.engine.world, this.track);
-
-    // Hook into Matter collisions for car↔wall feedback (sparks + small damage).
-    // collisionStart fires once per contact; collisionActive once per step
-    // while still touching. We throttle grinds per car to ~10Hz so we don't
-    // flood the event channel.
-    Matter.Events.on(this.engine, 'collisionStart', (ev) => this._onCollisionStart(ev));
-    Matter.Events.on(this.engine, 'collisionActive', (ev) => this._onCollisionActive(ev));
-    this._lastGrindMs = new Map();   // playerId -> ms
+    // No wall bodies — the track is a CSG union of trapezoid tiles and we
+    // clamp each car to it per fixed step (see physics.clampToTrack).
 
     // Wipe ECS world and rebuild from current players + track.
     for (const e of [...this.carEntities.values()])    this.ecs.removeEntity(e);
@@ -455,6 +416,41 @@ export class GameRoom {
 
     // 2. Run Matter physics step
     Matter.Engine.update(this.engine, dt * 1000);
+
+    // 2.5. CSG track containment — replace per-segment wall bodies. For each
+    // car, find the nearest centerline segment, clamp it inside the road
+    // surface, and emit grind/bump effects when we had to push it back.
+    eachCar(this.ecs, (e) => {
+      const body = getRigidBody(e);
+      const hit = clampToTrack(body, this.track);
+      if (!hit) return;
+      const now = Date.now();
+      const lastGrind = body._lastGrindMs || 0;
+      if (hit.speedSec > 50 && now - lastGrind > 80) {
+        body._lastGrindMs = now;
+        this.emitEvent({
+          type: 'grind',
+          playerId: body.ownerId,
+          x: hit.contactX, y: hit.contactY,
+          intensity: Math.min(1, hit.speedSec / 280),
+        });
+      }
+      // Bumps + damage when the car arrives fast and there's real penetration.
+      if (hit.speedSec > 200 && hit.overhang > 4) {
+        const lastBump = body._lastBumpMs || 0;
+        if (now - lastBump > 250) {
+          body._lastBumpMs = now;
+          const dmg = Math.min(22, hit.speedSec * 0.06);
+          dealDamage(body, dmg);
+          this.emitEvent({
+            type: 'bump',
+            playerId: body.ownerId,
+            x: hit.contactX, y: hit.contactY,
+            intensity: Math.min(1, hit.speedSec / 320),
+          });
+        }
+      }
+    });
 
     // 3. Pickups
     const now = Date.now();

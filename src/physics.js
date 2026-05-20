@@ -204,6 +204,76 @@ export function stepCar(body, dt) {
   if (body.oiled > 0) body.oiled = Math.max(0, body.oiled - dt);
 }
 
+// ---------- Track containment (CSG approach) ----------
+//
+// The track is the UNION of per-segment trapezoid tiles. Rather than build a
+// thousand Matter wall bodies (which break at sharp corners) we constrain
+// each car to the union once per fixed step. Find the nearest centerline
+// segment, project the car onto it, and if its perpendicular distance
+// exceeds the local half-width, push the car back to the boundary and kill
+// the outward velocity component. Returns null when no constraint fired, or
+// a small descriptor with the contact info for grind/bump effects.
+
+const CAR_HALF = CAR_WIDTH / 2;
+
+export function clampToTrack(body, track) {
+  if (!body.alive || !track || !track.tiles?.length) return null;
+  const cx = body.position.x, cy = body.position.y;
+
+  let bestDistSq = Infinity;
+  let bestPx = 0, bestPy = 0, bestWHalf = 0;
+  for (const tile of track.tiles) {
+    const dx = tile.bx - tile.ax;
+    const dy = tile.by - tile.ay;
+    const segLen2 = dx*dx + dy*dy || 1;
+    let t = ((cx - tile.ax) * dx + (cy - tile.ay) * dy) / segLen2;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const px = tile.ax + dx * t;
+    const py = tile.ay + dy * t;
+    const ddx = cx - px, ddy = cy - py;
+    const distSq = ddx*ddx + ddy*ddy;
+    if (distSq < bestDistSq) {
+      bestDistSq = distSq;
+      bestPx = px;
+      bestPy = py;
+      bestWHalf = tile.wA * (1 - t) + tile.wB * t;
+    }
+  }
+
+  const dist = Math.sqrt(bestDistSq);
+  const limit = bestWHalf - CAR_HALF;
+  if (dist <= limit) return null;       // safely inside the road
+
+  // Off-track. Push back to the boundary along the outward normal.
+  const overhang = dist - limit;
+  let nx, ny;
+  if (dist > 1e-3) { nx = (cx - bestPx) / dist; ny = (cy - bestPy) / dist; }
+  else             { nx = 1; ny = 0; }
+
+  Matter.Body.setPosition(body, {
+    x: cx - nx * overhang,
+    y: cy - ny * overhang,
+  });
+
+  // Kill the outward component of velocity, preserving the tangential slide.
+  const vx = body.velocity.x, vy = body.velocity.y;
+  const vDotN = vx * nx + vy * ny;
+  if (vDotN > 0) {
+    Matter.Body.setVelocity(body, {
+      x: vx - nx * vDotN * 0.95,
+      y: vy - ny * vDotN * 0.95,
+    });
+  }
+
+  // Per-step velocity → per-sec for the caller's intensity scaling.
+  const speedSec = Math.hypot(body.velocity.x, body.velocity.y) / FIXED_DT;
+  return {
+    nx, ny, overhang, speedSec,
+    contactX: cx - nx * overhang,
+    contactY: cy - ny * overhang,
+  };
+}
+
 // ---------- Damage / explode ----------
 
 export function dealDamage(body, amount) {
