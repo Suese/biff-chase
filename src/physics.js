@@ -105,11 +105,13 @@ export function surfaceModifiers(surface) {
 // ---------- Cars ----------
 
 export function createCarBody(x, y, angle, ownerId, stats) {
-  const body = Matter.Bodies.rectangle(x, y, CAR_WIDTH, CAR_LENGTH, {
+  // Matter.Bodies.rectangle(x, y, w, h): w along local X, h along local Y.
+  // At body.angle = 0 the chassis mesh runs LENGTH along world X (it's a
+  // BoxGeometry(4.5, ..., 1.8) — 4.5 long), so the body's X dimension is
+  // CAR_LENGTH and its Y dimension is CAR_WIDTH. The previous order was
+  // swapped, which made the collision box rotated 90° from the mesh.
+  const body = Matter.Bodies.rectangle(x, y, CAR_LENGTH, CAR_WIDTH, {
     angle,
-    // Mass ≈ density × area = 0.4 × (4.5 × 1.8) = 3.24 — reasonable in
-    // arbitrary mass units. Forces are user-applied so absolute mass is
-    // mostly aesthetic.
     density: 0.4,
     frictionAir: 0,
     friction: 0,
