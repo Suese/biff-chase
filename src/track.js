@@ -168,6 +168,7 @@ export function generateTrack(seed) {
     metaMap,
     biomeCells,
     tilePlacements,
+    outputTiles,
     wallSegments,
     gridSize: GRID_SIZE,
     cellSize: CELL_SIZE,

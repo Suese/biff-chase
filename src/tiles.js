@@ -119,12 +119,92 @@ export function dilateRoadCells(centerCells, radiusFor) {
   return { set, cells, widths };
 }
 
-// Wall segments derived from tile adjacency. For most cells: each side
-// without a road neighbour becomes a 4 m AXIAL wall (kind: 'axial').
-// For CORNER cells — exactly two adjacent road neighbours — the two
-// perpendicular straight walls are replaced by a SINGLE 45° diagonal wall
-// (kind: 'diag') that cuts the inner corner. Result: every road bend has
-// a chamfered inside edge instead of a step.
+// HALF-OFFSET OUTPUT TILES.
+//
+// The meta-grid says "what's on this cell" (biome / road). The OUTPUT
+// grid sits at the CORNER INTERSECTIONS of meta-cells (offset by ½ cell
+// on both axes). For every output-tile position we read the 4 meta-cells
+// that touch its corners (NW, NE, SW, SE) and pick a wall shape that
+// satisfies that constraint. Adjacent output tiles share two corners, so
+// walls join automatically across tile borders.
+//
+// Each tile carries { cgx, cgy, cx, cy, corners {nw, ne, sw, se}, walls }.
+// `walls` is the list of segments INSIDE the tile derived from its
+// road-corner pattern. There are 16 patterns (2^4 corner road/no-road
+// states); each maps to a specific wall layout.
+
+export function buildOutputTiles(metaMap, gridSize) {
+  const tiles = [];
+  const halfW = (gridSize * CELL_SIZE) / 2;
+  const H = CELL_SIZE / 2;
+  for (let cgy = 0; cgy <= gridSize; cgy++) {
+    for (let cgx = 0; cgx <= gridSize; cgx++) {
+      const nw = sampleMeta(metaMap, cgx - 1, cgy - 1, gridSize);
+      const ne = sampleMeta(metaMap, cgx,     cgy - 1, gridSize);
+      const sw = sampleMeta(metaMap, cgx - 1, cgy,     gridSize);
+      const se = sampleMeta(metaMap, cgx,     cgy,     gridSize);
+      const cx = cgx * CELL_SIZE - halfW;
+      const cy = cgy * CELL_SIZE - halfW;
+      const mask =
+        (nw === 'road' ? 1 : 0) |
+        (ne === 'road' ? 2 : 0) |
+        (sw === 'road' ? 4 : 0) |
+        (se === 'road' ? 8 : 0);
+      const walls = wallsForCornerMask(mask, cx, cy, H);
+      tiles.push({
+        cgx, cgy, cx, cy,
+        corners: { nw, ne, sw, se },
+        mask,
+        walls,
+      });
+    }
+  }
+  return tiles;
+}
+
+function sampleMeta(metaMap, gx, gy, gridSize) {
+  if (gx < 0 || gx >= gridSize || gy < 0 || gy >= gridSize) return 'water';
+  return metaMap[gy][gx];
+}
+
+// 16-case auto-tile wall lookup. Mask bits: 1=NW, 2=NE, 4=SW, 8=SE.
+//
+//   0 / 15 (none or all road) → no walls
+//   1 corner               → diagonal cutting that corner
+//   2 adjacent (half tile) → straight wall on the dividing line
+//   2 opposite (saddle)    → two diagonals (X)
+//   3 corners              → diagonal cutting the missing corner
+function wallsForCornerMask(mask, cx, cy, H) {
+  const Nm = { x: cx,     y: cy - H };
+  const Em = { x: cx + H, y: cy };
+  const Sm = { x: cx,     y: cy + H };
+  const Wm = { x: cx - H, y: cy };
+  const out = [];
+  const diag = (a, b) => out.push({ kind: 'diag', ax: a.x, ay: a.y, bx: b.x, by: b.y });
+  const horiz = () => out.push({ kind: 'axial', x: cx, y: cy, len: 2 * H, axis: 'x' });
+  const vert  = () => out.push({ kind: 'axial', x: cx, y: cy, len: 2 * H, axis: 'y' });
+  switch (mask) {
+    case 0: case 15: break;
+    case 1:  diag(Nm, Wm); break;   // NW only
+    case 2:  diag(Nm, Em); break;   // NE only
+    case 4:  diag(Sm, Wm); break;   // SW only
+    case 8:  diag(Sm, Em); break;   // SE only
+    case 3:  horiz(); break;         // NW+NE → top half road
+    case 12: horiz(); break;         // SW+SE → bottom half road
+    case 5:  vert();  break;         // NW+SW → left half road
+    case 10: vert();  break;         // NE+SE → right half road
+    case 6:  diag(Nm, Em); diag(Sm, Wm); break;  // NE+SW saddle
+    case 9:  diag(Nm, Wm); diag(Sm, Em); break;  // NW+SE saddle
+    case 7:  diag(Sm, Em); break;   // missing SE
+    case 11: diag(Sm, Wm); break;   // missing SW
+    case 13: diag(Nm, Em); break;   // missing NE
+    case 14: diag(Nm, Wm); break;   // missing NW
+  }
+  return out;
+}
+
+// LEGACY axial-only wall extraction from road placements — kept for
+// backwards compatibility but no longer used by the main pipeline.
 export function wallSegmentsFromTiles(placements) {
   const H = CELL_SIZE / 2;
   const walls = [];

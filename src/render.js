@@ -553,64 +553,43 @@ export class RallyScene {
       }
     }
 
-    // 2) Road tiles + their walls (one per meta-cell). Plain asphalt
-    // plate, no centre-line / dash / cross markings.
+    // 2) Road tiles (plain asphalt plates per meta-cell). No walls here —
+    // walls come from the output-tile system below.
     for (const p of track.tilePlacements || []) {
       const roadMat = ROAD_MATS[p.roadType] || ROAD_MATS.pavement;
       const plate = new THREE.Mesh(tileRoad, roadMat);
       plate.position.set(p.cx, 0.05, p.cy);
       this.trackGroup.add(plate);
+    }
 
-      // Walls baked into the tile. For CORNER tiles (2 adjacent road
-      // neighbours) we emit ONE 45° diagonal wall connecting the midpoints
-      // of the two missing sides — visible chamfer on every road bend.
-      // Other tile types use full-length axial walls on missing sides.
-      const n = (p.mask & MASK_N_BIT) !== 0;
-      const e = (p.mask & MASK_E_BIT) !== 0;
-      const s = (p.mask & MASK_S_BIT) !== 0;
-      const w = (p.mask & MASK_W_BIT) !== 0;
-      const count = (n + e + s + w);
-      const cornerAdjacent = count === 2 &&
-        ((n && e) || (e && s) || (s && w) || (w && n));
-
-      if (cornerAdjacent) {
-        let ax, ay, bx, by;
-        if (n && e)       { ax = p.cx;        ay = p.cy + HALF; bx = p.cx - HALF; by = p.cy;        }
-        else if (e && s)  { ax = p.cx - HALF; ay = p.cy;        bx = p.cx;        by = p.cy - HALF; }
-        else if (s && w)  { ax = p.cx;        ay = p.cy - HALF; bx = p.cx + HALF; by = p.cy;        }
-        else /* w && n */ { ax = p.cx + HALF; ay = p.cy;        bx = p.cx;        by = p.cy + HALF; }
-        const dx = bx - ax, dy = by - ay;
-        const len = Math.hypot(dx, dy);
-        const mx = (ax + bx) / 2, my = (ay + by) / 2;
-        const angle = Math.atan2(dy, dx);
-        const diagWallGeom = new THREE.BoxGeometry(len, 0.7, 0.30);
-        const diagTopGeom  = new THREE.BoxGeometry(len, 0.10, 0.34);
-        const wall = new THREE.Mesh(diagWallGeom, ROAD_WALL_MAT);
-        wall.position.set(mx, 0.5, my);
-        wall.rotation.y = -angle;
-        this.trackGroup.add(wall);
-        const top = new THREE.Mesh(diagTopGeom, ROAD_WALL_STRIPE_MAT);
-        top.position.set(mx, 0.92, my);
-        top.rotation.y = -angle;
-        this.trackGroup.add(top);
-      } else {
-        const sides = [
-          { has: MASK_N_BIT, dx: 0,    dz: -HALF, rotY: 0 },
-          { has: MASK_E_BIT, dx: HALF, dz: 0,    rotY: Math.PI / 2 },
-          { has: MASK_S_BIT, dx: 0,    dz: HALF, rotY: 0 },
-          { has: MASK_W_BIT, dx:-HALF, dz: 0,    rotY: Math.PI / 2 },
-        ];
-        for (const s of sides) {
-          if ((p.mask & s.has) !== 0) continue;
-          const wall = new THREE.Mesh(wallGeom, ROAD_WALL_MAT);
-          wall.position.set(p.cx + s.dx, 0.5, p.cy + s.dz);
-          wall.rotation.y = s.rotY;
-          this.trackGroup.add(wall);
-          const top = new THREE.Mesh(wallTopG, ROAD_WALL_STRIPE_MAT);
-          top.position.set(p.cx + s.dx, 0.92, p.cy + s.dz);
-          top.rotation.y = s.rotY;
-          this.trackGroup.add(top);
+    // 3) Walls from OUTPUT TILES (half-offset auto-tile). Each output
+    // tile reads 4 corner meta-cells and emits 0–2 walls inside itself.
+    // Adjacent output tiles share two corners, so wall endpoints meet
+    // naturally at the shared tile boundaries.
+    for (const t of track.outputTiles || []) {
+      for (const w of t.walls) {
+        let len, mx, my, rotY;
+        if (w.kind === 'diag') {
+          const dx = w.bx - w.ax;
+          const dy = w.by - w.ay;
+          len = Math.hypot(dx, dy);
+          mx = (w.ax + w.bx) / 2;
+          my = (w.ay + w.by) / 2;
+          rotY = -Math.atan2(dy, dx);
+        } else {
+          len = w.len;
+          mx = w.x;
+          my = w.y;
+          rotY = (w.axis === 'y') ? Math.PI / 2 : 0;
         }
+        const wall = new THREE.Mesh(new THREE.BoxGeometry(len, 0.7, 0.30), ROAD_WALL_MAT);
+        wall.position.set(mx, 0.5, my);
+        wall.rotation.y = rotY;
+        this.trackGroup.add(wall);
+        const top = new THREE.Mesh(new THREE.BoxGeometry(len, 0.10, 0.34), ROAD_WALL_STRIPE_MAT);
+        top.position.set(mx, 0.92, my);
+        top.rotation.y = rotY;
+        this.trackGroup.add(top);
       }
     }
   }
