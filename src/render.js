@@ -541,11 +541,13 @@ export class RallyScene {
         g.add(dash);
       }
     } else if (t.type === 'cap') {
-      // dead-end — a single dash perpendicular to the open edge
       const dash = new THREE.Mesh(tileGeoms.dash, DASH_MAT);
       dash.position.set(0, 0.24, 0.7);
       g.add(dash);
     }
+    // 'plate' (wide road) renders just the plate — no markings, since
+    // the cell isn't necessarily on the centerline. Centre-line markings
+    // are added separately along the actual racing line.
 
     return g;
   }

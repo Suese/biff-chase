@@ -49,24 +49,43 @@ function shapeAndRotation(neighbourMask) {
   return { type: 'straight', rotation: 0 };
 }
 
-// Build road-tile placements from a set of road cells (an array of {gx, gy}).
-// `roadType` is a string used by the renderer to pick a material.
+// Build flat road-plate placements from a set of road cells (after dilation).
+// Roads can be many cells wide so the auto-tile-shape distinction doesn't
+// really apply per cell — every road cell is a flat plate. The renderer
+// decides on markings (centre dashes, apex arcs) based on the cell's
+// distance from the centerline path.
+export function flatRoadPlacements(roadCells, roadType = 'pavement') {
+  const placements = [];
+  for (const c of roadCells) {
+    const world = cellToWorld(c.gx, c.gy);
+    placements.push({
+      gx: c.gx, gy: c.gy,
+      cx: world.x, cy: world.y,
+      type: 'plate',
+      rotation: 0,
+      roadType,
+    });
+  }
+  return placements;
+}
+
+// Legacy single-cell-wide autotile retained for cases where roads must be
+// exactly one cell wide (not currently used by the main pipeline).
 export function autotileRoad(roadCells, roadType = 'pavement') {
   const has = new Set(roadCells.map(c => `${c.gx},${c.gy}`));
   const placements = [];
   for (const c of roadCells) {
     let mask = 0;
-    if (has.has(`${c.gx},${c.gy - 1}`)) mask |= 1;   // N
-    if (has.has(`${c.gx + 1},${c.gy}`)) mask |= 2;   // E
-    if (has.has(`${c.gx},${c.gy + 1}`)) mask |= 4;   // S
-    if (has.has(`${c.gx - 1},${c.gy}`)) mask |= 8;   // W
+    if (has.has(`${c.gx},${c.gy - 1}`)) mask |= 1;
+    if (has.has(`${c.gx + 1},${c.gy}`)) mask |= 2;
+    if (has.has(`${c.gx},${c.gy + 1}`)) mask |= 4;
+    if (has.has(`${c.gx - 1},${c.gy}`)) mask |= 8;
     const { type, rotation } = shapeAndRotation(mask);
     const world = cellToWorld(c.gx, c.gy);
     placements.push({
       gx: c.gx, gy: c.gy,
       cx: world.x, cy: world.y,
-      type, rotation,
-      roadType,
+      type, rotation, roadType,
     });
   }
   return placements;
@@ -77,6 +96,38 @@ export function autotileRoad(roadCells, roadType = 'pavement') {
 // 4-connected.
 export function centerlineFromCells(roadCells) {
   return roadCells.map(c => cellToWorld(c.gx, c.gy));
+}
+
+// Dilate a centerline cell chain into a wide road area. For each cell in
+// the chain we add all neighbouring cells within `radius[i]` cells using
+// a circular footprint (so corners stay rounded instead of stepped).
+// Returns:
+//   set     — Set<"gx,gy"> of every cell now considered road area.
+//   cells   — [{gx,gy}] in the same set (handy for iteration).
+//   widthM  — per-input-cell width in metres ((2r+1) * CELL_SIZE).
+export function dilateRoadCells(centerCells, radiusFor) {
+  const set = new Set();
+  const cells = [];
+  const widths = [];
+  for (let i = 0; i < centerCells.length; i++) {
+    const c = centerCells[i];
+    const r = Math.max(1, Math.floor(radiusFor(i)));
+    widths.push((2 * r + 1) * CELL_SIZE);
+    const r2 = r * r;
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dy = -r; dy <= r; dy++) {
+        if (dx * dx + dy * dy > r2) continue;
+        const gx = c.gx + dx;
+        const gy = c.gy + dy;
+        const key = `${gx},${gy}`;
+        if (!set.has(key)) {
+          set.add(key);
+          cells.push({ gx, gy });
+        }
+      }
+    }
+  }
+  return { set, cells, widths };
 }
 
 // One Chaikin smoothing pass on a closed polyline.

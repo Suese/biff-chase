@@ -18,12 +18,7 @@ import {
   generateBiomeMap, pickCheckpoints, carveRoad,
   cellToWorld, WATER, LAND, FOREST, MOUNTAIN,
 } from './terrain.js';
-import { autotileRoad, centerlineFromCells } from './tiles.js';
-
-// Match the cell size exactly. Physics trapezoids that drive clampToTrack
-// then align with the visual tile boundaries — no road area exists outside
-// the cells, and adjacent trapezoids meet edge-to-edge instead of overlapping.
-const ROAD_WIDTH = CELL_SIZE;    // 4 m, same as a cell
+import { flatRoadPlacements, centerlineFromCells, dilateRoadCells } from './tiles.js';
 
 export function generateTrack(seed) {
   const rng = mulberry32(seed >>> 0);
@@ -53,22 +48,37 @@ export function generateTrack(seed) {
     for (let y = R - 1; y >= -R + 1; y--) roadCells.push({ gx: cx - R, gy: cy + y });
   }
 
-  // 4. Auto-tile the road. Vary road material a bit per section by sampling
-  // the biome cost at each cell — land = pavement, forest = gravel — so the
-  // track tells you what it's running over.
-  const placementsRaw = autotileRoad(roadCells, 'pavement');
+  // 4. Per-centerline-cell width. We pick a base radius (in cells) that
+  // varies along the path with a slow sinusoid + a touch of noise so the
+  // road feels like it widens into pit lanes and narrows through forest
+  // pinches. Radius 1 = 3 tiles wide (12 m); radius 3 = 7 tiles (28 m).
+  const widthPhase = rng() * Math.PI * 2;
+  const widthFreq = 2 + Math.floor(rng() * 3);
+  const radiusFor = (i) => {
+    const t = i / Math.max(1, roadCells.length);
+    const wave = Math.sin(t * Math.PI * 2 * widthFreq + widthPhase);
+    // 1..3 base + sometimes pushes up to 4 (= 9 tiles, max-wide section)
+    const r = 2 + wave * 1.2 + ((rng() < 0.06) ? 1 : 0);
+    return Math.max(1, Math.min(4, Math.round(r)));
+  };
+  const { set: roadCellSet, cells: dilatedCells, widths: cellWidthsM } =
+    dilateRoadCells(roadCells, radiusFor);
+
+  // 5. Centerline = exact cell-centre polyline (no curve smoothing).
+  const centerline = centerlineFromCells(roadCells);
+  const widths = cellWidthsM;
+
+  // 6. Road tile placements: every dilated cell becomes a flat road plate.
+  // Material per cell: forest cells stay gravel, ice/pavement use seed-based
+  // choice so each track has personality.
+  const placementsRaw = flatRoadPlacements(dilatedCells, 'pavement');
   for (const p of placementsRaw) {
+    if (p.gy < 0 || p.gy >= GRID_SIZE || p.gx < 0 || p.gx >= GRID_SIZE) continue;
     const b = biomeMap.map[p.gy][p.gx];
     if (b === FOREST) p.roadType = 'gravel';
   }
 
-  // 5. Centerline = exact cell-centre polyline. NO curve smoothing of any
-  // kind — the polyline is a straight line through each cell centre to
-  // the next. That keeps physics aligned with the visible tile grid.
-  const centerline = centerlineFromCells(roadCells);
-  const widths = centerline.map(() => ROAD_WIDTH);
-
-  // 6. Start vector at centerline[0].
+  // 7. Start vector at centerline[0].
   const start = centerline[0];
   const startTangent = normalize({
     x: centerline[1].x - centerline[centerline.length - 1].x,
@@ -141,12 +151,13 @@ export function generateTrack(seed) {
     maxX:  WORLD_HALF, maxY:  WORLD_HALF,
   };
 
-  // 11. Biome cell data for the renderer (one entry per non-road cell).
+  // 11. Biome cell data for the renderer (per cell). isRoad is true when
+  // the DILATED road area covers the cell (so the renderer skips biome
+  // decoration for it).
   const biomeCells = [];
-  const roadKey = new Set(roadCells.map(c => `${c.gx},${c.gy}`));
   for (let gy = 0; gy < GRID_SIZE; gy++) {
     for (let gx = 0; gx < GRID_SIZE; gx++) {
-      const isRoad = roadKey.has(`${gx},${gy}`);
+      const isRoad = roadCellSet.has(`${gx},${gy}`);
       const world = cellToWorld(gx, gy);
       biomeCells.push({
         gx, gy,
