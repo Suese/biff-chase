@@ -451,7 +451,13 @@ onGameTick((dt) => {
   if (interpCars.has(myId)) cam = interpCars.get(myId);
   else if (interpCars.size > 0) cam = interpCars.values().next().value;
   if (cam) scene.setCameraTarget(cam.x, cam.y);
-  scene.setZoom(0.65);
+  // Dynamic zoom: tight at standstill, pull back as the local car gains speed
+  // so the player sees more of the road ahead. Tuned so a stationary car
+  // sits comfortably in frame and full-tilt feels like Death Rally.
+  const me = interpCars.get(myId);
+  const speed = me ? Math.hypot(me.vx, me.vy) : 0;
+  const speedNorm = Math.min(1, speed / 260);
+  scene.setZoom(1.25 - speedNorm * 0.35);    // 1.25 at rest → 0.9 at full tilt
 
   // Draw cars + pickups + hazards using interpolated state
   const dispState = lastState;
