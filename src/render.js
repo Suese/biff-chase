@@ -6,7 +6,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { PLAYER_COLORS } from './colors.js';
 import { ITEMS } from './items.js';
 import { CELL_SIZE } from './tiles.js';
-import { WATER, LAND, FOREST, MOUNTAIN } from './terrain.js';
+import { WATER, LAND, FOREST, MOUNTAIN, ROAD } from './terrain.js';
 
 // ---- Materials shared across every cell of a given biome / road type.
 
@@ -400,18 +400,12 @@ export class RallyScene {
     }
     this.skidMarks.length = 0;
 
-    // ---- Biome ground tiles first.
-    if (track.biomeCells?.length) {
-      this._buildBiomeGround(track);
-    }
-
-    // ---- Road tiles on top.
-    if (track.tilePlacements?.length) {
-      for (const t of track.tilePlacements) {
-        const mat = ROAD_MATS[t.roadType] || ROAD_MATS.pavement;
-        const tile = this._buildRoadTile(t, mat);
-        if (tile) this.trackGroup.add(tile);
-      }
+    // ---- Half-offset output tile system. Output tiles paint the whole
+    // world: ground, transitions, road, walls — all baked into the tile
+    // mesh chosen by the 4 corner biomes of the meta-grid. There is no
+    // separate per-meta-cell ground pass.
+    if (track.outputTiles?.length) {
+      this._buildTileMap(track);
       this._buildStartFinish(track);
       return;
     }
@@ -502,12 +496,140 @@ export class RallyScene {
     }
   }
 
-  // Build the BIOME GROUND layer. Each biome has multiple shade variants
-  // picked deterministically per cell, plus on-cell decorations (trees,
-  // peaks, pebbles, flowers) that all read from the same per-cell hash so
-  // a regenerated track lays out identically. Boundary cells also get
-  // transition decorations (sand at water edges, bushes at forest edges,
-  // pebbles at mountain feet).
+  // True tile map. For each output tile (at the corner intersection of
+  // 4 meta-cells), render 4 quadrant meshes — one per surrounding meta-
+  // cell biome — plus any walls that come from road↔non-road quadrant
+  // pairs. Decorations (single tree, peak, water surface) live at the
+  // quadrant centre so each meta-cell shows ONE primary feature.
+  _buildTileMap(track) {
+    const HALF_Q = CELL_SIZE / 4;            // distance from tile centre to quadrant centre
+    const QUAD = CELL_SIZE / 2;              // quadrant edge length
+    const quadGround  = new THREE.BoxGeometry(QUAD, 0.3, QUAD);
+    const quadWater   = new THREE.BoxGeometry(QUAD * 1.001, 0.06, QUAD * 1.001);
+    const quadRoad    = new THREE.BoxGeometry(QUAD, 0.16, QUAD);
+    const treeTrunk   = new THREE.CylinderGeometry(0.12, 0.16, 1.0, 6);
+    const treeFoliage = new THREE.ConeGeometry(0.85, 2.2, 7);
+    const peakGeom    = new THREE.ConeGeometry(1.0, 2.6, 6);
+    const wallGeom    = new THREE.BoxGeometry(QUAD, 0.6, 0.28);
+    const wallTopGeom = new THREE.BoxGeometry(QUAD, 0.1, 0.32);
+    const sandStripGeom = new THREE.BoxGeometry(QUAD, 0.07, 0.4);
+
+    // Helper: per-biome material picker (with a stable hash for shade variants).
+    const matFor = (biome, gx, gy) => {
+      if (biome === ROAD) return ROAD_MATS.pavement;
+      if (biome === WATER) return WATER_GROUND_MAT;
+      if (biome === LAND) return GRASS_MATS[cellHash(gx, gy, 1) % GRASS_MATS.length];
+      if (biome === FOREST) return FOREST_GROUND_MATS[cellHash(gx, gy, 2) % FOREST_GROUND_MATS.length];
+      if (biome === MOUNTAIN) return MOUNTAIN_GROUND_MATS[cellHash(gx, gy, 3) % MOUNTAIN_GROUND_MATS.length];
+      return GRASS_MATS[0];
+    };
+
+    // Build each output tile.
+    for (const t of track.outputTiles) {
+      // Quadrant info: which meta-cell each quadrant covers + its world position.
+      const quads = [
+        { biome: t.corners.nw, gx: t.cgx - 1, gy: t.cgy - 1, dx: -HALF_Q, dz: -HALF_Q },
+        { biome: t.corners.ne, gx: t.cgx,     gy: t.cgy - 1, dx:  HALF_Q, dz: -HALF_Q },
+        { biome: t.corners.sw, gx: t.cgx - 1, gy: t.cgy,     dx: -HALF_Q, dz:  HALF_Q },
+        { biome: t.corners.se, gx: t.cgx,     gy: t.cgy,     dx:  HALF_Q, dz:  HALF_Q },
+      ];
+
+      for (const q of quads) {
+        // Pick geometry + material + ground height per biome.
+        let geom, yPos;
+        if (q.biome === WATER)        { geom = quadWater;  yPos = -0.50; }
+        else if (q.biome === ROAD)    { geom = quadRoad;   yPos =  0.04; }
+        else                          { geom = quadGround; yPos = -0.20; }
+        const mat = matFor(q.biome, q.gx, q.gy);
+        const ground = new THREE.Mesh(geom, mat);
+        ground.position.set(t.cx + q.dx, yPos, t.cy + q.dz);
+        this.trackGroup.add(ground);
+
+        // ONE primary feature per quadrant — small + crisp so the tile reads
+        // immediately. Position is at the quadrant centre so it's predictable.
+        if (q.biome === FOREST) {
+          const trunk = new THREE.Mesh(treeTrunk, TRUNK_MAT);
+          trunk.position.set(t.cx + q.dx, 0.5, t.cy + q.dz);
+          this.trackGroup.add(trunk);
+          const foliage = new THREE.Mesh(treeFoliage, FOLIAGE_MAT);
+          foliage.position.set(t.cx + q.dx, 1.8, t.cy + q.dz);
+          this.trackGroup.add(foliage);
+        } else if (q.biome === MOUNTAIN) {
+          const peak = new THREE.Mesh(peakGeom, ROCK_MAT);
+          peak.position.set(t.cx + q.dx, 1.1, t.cy + q.dz);
+          this.trackGroup.add(peak);
+        } else if (q.biome === WATER) {
+          const surf = new THREE.Mesh(quadWater, WATER_SURF_MAT);
+          surf.position.set(t.cx + q.dx, -0.10, t.cy + q.dz);
+          this.trackGroup.add(surf);
+        } else if (q.biome === ROAD) {
+          // Dashed lane stripe — short white box along the long axis of the road.
+          const dashCol = pickVariant(q.gx, q.gy, 7, 4) === 0 ? null : DASH_MAT;
+          if (dashCol) {
+            const dash = new THREE.Mesh(
+              new THREE.BoxGeometry(QUAD * 0.5, 0.04, 0.14),
+              DASH_MAT,
+            );
+            dash.position.set(t.cx + q.dx, 0.15, t.cy + q.dz);
+            this.trackGroup.add(dash);
+          }
+        }
+      }
+
+      // Transition decoration: sand strip on the LAND side of a land/water
+      // adjacency within this output tile.
+      const pairs = [
+        { a: 'nw', b: 'ne', wallAxis: 'x', wallZ: -HALF_Q, wallX:  0       },
+        { a: 'ne', b: 'se', wallAxis: 'y', wallX:  HALF_Q, wallZ:  0       },
+        { a: 'sw', b: 'se', wallAxis: 'x', wallZ:  HALF_Q, wallX:  0       },
+        { a: 'nw', b: 'sw', wallAxis: 'y', wallX: -HALF_Q, wallZ:  0       },
+      ];
+      for (const pair of pairs) {
+        const ba = t.corners[pair.a];
+        const bb = t.corners[pair.b];
+        if (ba === LAND && bb === WATER) {
+          const strip = new THREE.Mesh(sandStripGeom, SAND_MAT);
+          // Position strip on the LAND side of the boundary.
+          if (pair.wallAxis === 'x') {
+            strip.position.set(t.cx + pair.wallX, -0.15, t.cy + pair.wallZ - 0.18);
+            strip.rotation.y = 0;
+          } else {
+            strip.position.set(t.cx + pair.wallX - 0.18, -0.15, t.cy + pair.wallZ);
+            strip.rotation.y = Math.PI / 2;
+          }
+          this.trackGroup.add(strip);
+        } else if (bb === LAND && ba === WATER) {
+          const strip = new THREE.Mesh(sandStripGeom, SAND_MAT);
+          if (pair.wallAxis === 'x') {
+            strip.position.set(t.cx + pair.wallX, -0.15, t.cy + pair.wallZ + 0.18);
+            strip.rotation.y = 0;
+          } else {
+            strip.position.set(t.cx + pair.wallX + 0.18, -0.15, t.cy + pair.wallZ);
+            strip.rotation.y = Math.PI / 2;
+          }
+          this.trackGroup.add(strip);
+        }
+      }
+
+      // Walls baked INTO the tile. Already filtered to `present` ones at
+      // track-build time, but each output tile has its own t.walls list.
+      for (const w of t.walls) {
+        if (!w.present) continue;
+        const rotY = (w.axis === 'y') ? Math.PI / 2 : 0;
+        const wall = new THREE.Mesh(wallGeom, ROAD_WALL_MAT);
+        wall.position.set(w.x, 0.42, w.y);
+        wall.rotation.y = rotY;
+        this.trackGroup.add(wall);
+        const top = new THREE.Mesh(wallTopGeom, ROAD_WALL_STRIPE_MAT);
+        top.position.set(w.x, 0.77, w.y);
+        top.rotation.y = rotY;
+        this.trackGroup.add(top);
+      }
+    }
+  }
+
+  // Legacy method, retained for backward compatibility (not called by the
+  // new tile-map path).
   _buildBiomeGround(track) {
     const cells = track.biomeCells;
     // Build a lookup so transition code can read neighbour biomes.
@@ -649,25 +771,8 @@ export class RallyScene {
       }
     }
 
-    // ---- Walls come from the half-offset output tiles (track.wallSegments)
-    // rather than being computed per-road-cell. The tile system decides
-    // where walls go based on the 4-corner biome pattern at each tile.
-    if (track.wallSegments?.length) {
-      // Half-tile-length wall and stripe geometry (2 m long, not full cell).
-      const wallGeom = new THREE.BoxGeometry(CELL_SIZE / 2, 0.6, 0.28);
-      const topGeom  = new THREE.BoxGeometry(CELL_SIZE / 2, 0.1, 0.32);
-      for (const w of track.wallSegments) {
-        const rotY = (w.axis === 'y') ? Math.PI / 2 : 0;
-        const wall = new THREE.Mesh(wallGeom, ROAD_WALL_MAT);
-        wall.position.set(w.x, 0.42, w.y);
-        wall.rotation.y = rotY;
-        this.trackGroup.add(wall);
-        const top = new THREE.Mesh(topGeom, ROAD_WALL_STRIPE_MAT);
-        top.position.set(w.x, 0.77, w.y);
-        top.rotation.y = rotY;
-        this.trackGroup.add(top);
-      }
-    }
+    // Wall pass is part of the new _buildTileMap; this legacy branch is
+    // kept for reference but no longer called.
   }
 
   // Helper for one-edge transition strips (e.g. shoreline sand).
