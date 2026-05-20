@@ -38,20 +38,21 @@ export function makeHazardEntity({ id, kind, ownerId, x, y, ttl }) {
   return e;
 }
 
-// Helpers — ecs-lib's Iterator.each takes a callback that returns true to
-// short-circuit. We collect into plain arrays for ergonomic iteration.
+// Helpers. CRITICAL: ecs-lib's Iterator.each BREAKS when the callback returns
+// `false` (line 334 of node_modules/ecs-lib/index.js). Returning anything
+// else (undefined / true) continues. We return undefined so we process every
+// matching entity.
 export function eachCar(ecs, cb) {
   ecs.query([RigidBody.type, Driver.type, Lap.type]).each(e => {
     const rb = RigidBody.oneFrom(e);
     if (rb?.data?.kind === 'car') cb(e);
-    return false;
   });
 }
 export function eachPickup(ecs, cb) {
-  ecs.query([Pickup.type]).each(e => { cb(e); return false; });
+  ecs.query([Pickup.type]).each(e => { cb(e); });
 }
 export function eachHazard(ecs, cb) {
-  ecs.query([Hazard.type]).each(e => { cb(e); return false; });
+  ecs.query([Hazard.type]).each(e => { cb(e); });
 }
 
 export function getRigidBody(e)  { return RigidBody.oneFrom(e)?.data?.body || null; }
