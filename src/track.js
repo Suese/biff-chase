@@ -11,31 +11,24 @@ import { mulberry32, rfloat } from './rng.js';
 export function generateTrack(seed) {
   const rng = mulberry32(seed >>> 0);
 
-  // Track is built from a polygon snapped roughly to a coarse grid — gives
-  // the angular, "fills the page" Death Rally feel rather than the round
-  // race-around-a-doughnut shape.
-  const N = 18 + Math.floor(rng() * 5);    // 18-22 vertices
-  const baseR = 850;
-  const radJitter = 320;
-  const gridStep = 140;                    // snap vertex coords to multiples of this
+  // Polygon-based centerline. Vertices live on a jittered circle — but with
+  // only one Chaikin smoothing pass each corner stays sharp, giving the
+  // angular Death Rally feel without the self-intersection risk of a
+  // grid-snapped layout.
+  const N = 16 + Math.floor(rng() * 5);    // 16-20 vertices
+  const baseR = 900;
+  const radJitter = 380;
   const ctrl = [];
   for (let i = 0; i < N; i++) {
-    const a = (i / N) * Math.PI * 2 + rfloat(rng, -0.1, 0.1);
+    const a = (i / N) * Math.PI * 2 + rfloat(rng, -0.08, 0.08);
     const r = baseR + rfloat(rng, -radJitter, radJitter);
-    let x = Math.cos(a) * r;
-    let y = Math.sin(a) * r;
-    // Snap to grid so segments end up biased toward axis-aligned runs and
-    // ~90° turns rather than gentle curves.
-    x = Math.round(x / gridStep) * gridStep;
-    y = Math.round(y / gridStep) * gridStep;
-    ctrl.push({ x, y });
+    ctrl.push({ x: Math.cos(a) * r, y: Math.sin(a) * r });
   }
 
-  // Single Chaikin pass — barely rounds the polygon corners, doesn't melt
-  // them away.
+  // One Chaikin pass — barely rounds the polygon corners, keeps the angles.
   let pts = chaikinClosed(ctrl);
 
-  // Resample at a coarser interval so the wall mesh stays light.
+  // Resample at coarser interval.
   pts = resampleByArc(pts, 60);
 
   // Per-vertex track width with smooth variation. Base is wide enough that a
@@ -102,9 +95,10 @@ export function generateTrack(seed) {
     });
   }
 
-  // Pickup slots — distributed along the centerline, on alternating sides.
+  // Pickup slots — sparsely distributed along the centerline, on alternating
+  // sides. One pickup roughly every ~18 vertices = ~1100 px of track.
   const pickupSlots = [];
-  const pickupStep = 4;
+  const pickupStep = 18;
   for (let i = 0; i < pts.length; i += pickupStep) {
     const p = pts[i];
     const prev = pts[(i - 1 + pts.length) % pts.length];

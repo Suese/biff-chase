@@ -41,14 +41,14 @@ export function computeStats(upgrades = {}) {
   const arm = upgrades.armor  || 0;
   const fue = upgrades.fuel   || 0;
   return {
-    maxSpeed:   240 + eng * 28,    // pixels per second
-    accel:      520 + eng * 90,
-    brake:      900 + eng * 30,
-    reverse:    180 + eng * 20,
-    grip:       0.55 + tir * 0.06,  // lateral friction coefficient — lower = more drift
-    turnSpeed:  3.0 + tir * 0.35,   // rad/sec
+    maxSpeed:   420 + eng * 50,    // pixels per second
+    accel:      820 + eng * 140,
+    brake:     1200 + eng * 40,
+    reverse:    280 + eng * 28,
+    grip:       0.55 + tir * 0.06,  // lower = more drift
+    turnSpeed:  3.2 + tir * 0.35,   // rad/sec
     armor:      100 + arm * 35,
-    nitroMul:   1.0 + fue * 0.25,   // multiplies nitro duration
+    nitroMul:   1.0 + fue * 0.25,
     nitroBoost: 1.55 + eng * 0.06,  // top-speed mul during nitro
   };
 }
