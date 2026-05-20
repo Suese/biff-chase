@@ -83,8 +83,32 @@ export class GameRoom {
     this.scrap[id]       = this.scrap[id]       || 0;
     this.upgrades[id]    = this.upgrades[id]    || { engine: 0, tires: 0, armor: 0, fuel: 0 };
     this.inventories[id] = this.inventories[id] || {};
+    // Spawn a car for late joiners so they don't sit out the current race.
+    if ((this.phase === 'countdown' || this.phase === 'racing') && this.engine && this.track) {
+      this._spawnCarForPlayer(id, name);
+      // Force the next snapshot to include the full track so the new client
+      // can render it before they see their car.
+      this._lastBroadcastTrackSeed = null;
+    }
     this.emitState();
     this.emitEvent({ type: 'log', text: `${name} joined.` });
+  }
+
+  // Spawn a single car at the back of the current grid. Used by beginRace and
+  // by addPlayer for late joiners.
+  _spawnCarForPlayer(playerId, playerName) {
+    const slot = gridSpawnPositions(this.track, this.players.length)[
+      // Late joiners go to the BACK of the grid (last index).
+      this.players.findIndex(p => p.id === playerId)
+    ];
+    if (!slot) return;
+    const stats = computeStats(this.upgrades[playerId] || {});
+    const body = createCarBody(slot.x, slot.y, slot.angle, playerId, stats);
+    Matter.Composite.add(this.engine.world, body);
+    this.cars.set(playerId, body);
+    const ent = makeCarEntity({ body, driverId: playerId, driverName: playerName });
+    this.ecs.addEntity(ent);
+    this.carEntities.set(playerId, ent);
   }
 
   removePlayer(id) {
@@ -139,17 +163,7 @@ export class GameRoom {
     this.hazardEntities.clear();
     this.cars.clear();
 
-    const slots = gridSpawnPositions(this.track, this.players.length);
-    this.players.forEach((p, i) => {
-      const slot = slots[i] || slots[0];
-      const stats = computeStats(this.upgrades[p.id] || {});
-      const body = createCarBody(slot.x, slot.y, slot.angle, p.id, stats);
-      Matter.Composite.add(this.engine.world, body);
-      this.cars.set(p.id, body);
-      const ent = makeCarEntity({ body, driverId: p.id, driverName: p.name });
-      this.ecs.addEntity(ent);
-      this.carEntities.set(p.id, ent);
-    });
+    this.players.forEach((p) => this._spawnCarForPlayer(p.id, p.name));
 
     // Pickups
     const rng = mulberry32(seed ^ 0xCAFEBABE);
