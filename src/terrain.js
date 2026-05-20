@@ -149,18 +149,19 @@ function nearestTraversable(map, gridSize, gx, gy) {
 // ---- A* -----------------------------------------------------------------
 
 // Find the cheapest 4-connected path from start to end using biomeCost().
-// Returns an array of {gx, gy} including both endpoints, or null on failure.
-export function astar(start, end, biomeMap) {
+// Cells whose "gx,gy" key is in `excludeKeys` are treated as blocked, so
+// successive A* runs can avoid revisiting cells used by earlier segments.
+export function astar(start, end, biomeMap, excludeKeys = null) {
   const { map, gridSize } = biomeMap;
   const open = new Map();
   const closed = new Set();
   const keyOf = (gx, gy) => gy * gridSize + gx;
+  const stringKey = (gx, gy) => `${gx},${gy}`;
 
   const startKey = keyOf(start.gx, start.gy);
   open.set(startKey, { gx: start.gx, gy: start.gy, g: 0, f: 0, parent: null });
 
   while (open.size > 0) {
-    // Pop lowest-f node.
     let bestKey = null, bestNode = null, bestF = Infinity;
     for (const [k, n] of open) {
       if (n.f < bestF) { bestF = n.f; bestKey = k; bestNode = n; }
@@ -179,11 +180,11 @@ export function astar(start, end, biomeMap) {
       if (nx < 0 || nx >= gridSize || ny < 0 || ny >= gridSize) continue;
       const nKey = keyOf(nx, ny);
       if (closed.has(nKey)) continue;
+      if (excludeKeys && excludeKeys.has(stringKey(nx, ny))) continue;
       const b = map[ny][nx];
       const c = biomeCost(b);
       if (!isFinite(c)) continue;
       const g = bestNode.g + c;
-      // Manhattan heuristic — admissible for 4-connected unit grid.
       const h = Math.abs(nx - end.gx) + Math.abs(ny - end.gy);
       const f = g + h;
       const existing = open.get(nKey);
@@ -197,26 +198,36 @@ export function astar(start, end, biomeMap) {
 // ---- Road carving -------------------------------------------------------
 
 // Visit each checkpoint in order, running A* between consecutive ones, and
-// returning the full closed loop of road cells. Successive segments share
-// their endpoint cells so consecutive cells in the result are always
-// 4-connected.
+// returning the full closed loop of road cells. Two safeguards apply:
+//   (a) successive A* runs add the cells already used to their `closed`
+//       set so paths can't revisit earlier ones — eliminates any chance
+//       of A* paths crossing.
+//   (b) a final pass dedupes consecutive duplicate cells from segment
+//       joins.
 export function carveRoad(checkpoints, biomeMap) {
   if (!checkpoints || checkpoints.length < 2) return [];
   const cells = [];
+  const usedKeys = new Set();
+  const keyOf = (c) => `${c.gx},${c.gy}`;
+
   for (let i = 0; i < checkpoints.length; i++) {
     const a = checkpoints[i];
     const b = checkpoints[(i + 1) % checkpoints.length];
-    const path = astar(a, b, biomeMap);
+    const exclude = new Set(usedKeys);
+    // The endpoints themselves must be reachable on this run.
+    exclude.delete(keyOf(a));
+    exclude.delete(keyOf(b));
+    const path = astar(a, b, biomeMap, exclude);
     if (!path) continue;
-    // Skip the first cell of each subsequent segment to avoid duplication.
     const start = (i === 0) ? 0 : 1;
-    for (let j = start; j < path.length; j++) cells.push(path[j]);
-  }
-  // Drop a trailing duplicate if the closing segment landed back on cell 0.
-  if (cells.length > 1
-      && cells[0].gx === cells[cells.length - 1].gx
-      && cells[0].gy === cells[cells.length - 1].gy) {
-    cells.pop();
+    for (let j = start; j < path.length; j++) {
+      const c = path[j];
+      const k = keyOf(c);
+      // Skip if we somehow still ended up on a previously-used cell.
+      if (usedKeys.has(k)) continue;
+      usedKeys.add(k);
+      cells.push(c);
+    }
   }
   return cells;
 }

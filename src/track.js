@@ -18,9 +18,12 @@ import {
   generateBiomeMap, pickCheckpoints, carveRoad,
   cellToWorld, WATER, LAND, FOREST, MOUNTAIN,
 } from './terrain.js';
-import { autotileRoad, centerlineFromCells, chaikinClosed } from './tiles.js';
+import { autotileRoad, centerlineFromCells } from './tiles.js';
 
-const ROAD_WIDTH = 10;    // metres
+// Match the cell size exactly. Physics trapezoids that drive clampToTrack
+// then align with the visual tile boundaries — no road area exists outside
+// the cells, and adjacent trapezoids meet edge-to-edge instead of overlapping.
+const ROAD_WIDTH = CELL_SIZE;    // 4 m, same as a cell
 
 export function generateTrack(seed) {
   const rng = mulberry32(seed >>> 0);
@@ -36,15 +39,18 @@ export function generateTrack(seed) {
   }
 
   // 3. A* road carving between consecutive checkpoints (closed loop).
+  // carveRoad already dedupes globally and excludes used cells on each run
+  // so no two road cells can share the same (gx, gy).
   let roadCells = carveRoad(checkpoints, biomeMap);
   if (roadCells.length < 6) {
-    // Last-ditch: a small ring on the grid centre, all land.
+    // Last-ditch fallback: a small square ring on the grid centre.
     const cx = Math.floor(GRID_SIZE / 2), cy = Math.floor(GRID_SIZE / 2);
+    const R = 8;
     roadCells = [];
-    for (let i = 0; i < 16; i++) {
-      const a = (i / 16) * Math.PI * 2;
-      roadCells.push({ gx: cx + Math.round(Math.cos(a) * 8), gy: cy + Math.round(Math.sin(a) * 8) });
-    }
+    for (let x = -R; x <= R; x++) roadCells.push({ gx: cx + x, gy: cy - R });
+    for (let y = -R + 1; y <= R; y++) roadCells.push({ gx: cx + R, gy: cy + y });
+    for (let x = R - 1; x >= -R; x--) roadCells.push({ gx: cx + x, gy: cy + R });
+    for (let y = R - 1; y >= -R + 1; y--) roadCells.push({ gx: cx - R, gy: cy + y });
   }
 
   // 4. Auto-tile the road. Vary road material a bit per section by sampling
@@ -56,9 +62,10 @@ export function generateTrack(seed) {
     if (b === FOREST) p.roadType = 'gravel';
   }
 
-  // 5. Centerline (cell-centre polyline → Chaikin smoothing).
-  const rawCenterline = centerlineFromCells(roadCells);
-  const centerline = chaikinClosed(rawCenterline);
+  // 5. Centerline = exact cell-centre polyline. NO curve smoothing of any
+  // kind — the polyline is a straight line through each cell centre to
+  // the next. That keeps physics aligned with the visible tile grid.
+  const centerline = centerlineFromCells(roadCells);
   const widths = centerline.map(() => ROAD_WIDTH);
 
   // 6. Start vector at centerline[0].
