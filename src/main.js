@@ -490,12 +490,16 @@ onGameTick((dt) => {
   // Minimap
   scene.drawMinimap({ ...dispState, cars: displayCars }, myId);
 
-  // Speedo: m/s → km/h is × 3.6.
+  // Speedo: m/s → km/h is × 3.6. Tire screech intensity follows the host-
+  // reported drift coefficient (already in [0..1] per car).
   const me = displayCars.find(c => c.id === myId);
   if (me) {
     const kmh = Math.hypot(me.vx, me.vy) * 3.6;
     ui.renderSpeed(kmh);
     sfx.setEngine(kmh, me.boost > 0);
+    sfx.setDriftLevel(me.alive ? (me.drift || 0) : 0);
+  } else {
+    sfx.setDriftLevel(0);
   }
 
   // Countdown text update — banner ticks once per second

@@ -11,39 +11,54 @@ import { mulberry32, rfloat } from './rng.js';
 export function generateTrack(seed) {
   const rng = mulberry32(seed >>> 0);
 
-  // Polygon-based centerline. All distances in METRES.
-  //   baseR ≈ 75m radius — roughly a 150m × 150m track footprint.
-  //   radJitter ≈ ±25m for shape variety.
-  const N = 16 + Math.floor(rng() * 5);
-  const baseR = 75;
-  const radJitter = 25;
+  // Snake-style centerline: a sum of low-frequency sinusoids in polar
+  // coordinates. The result is a closed loop that winds in and out of its
+  // bounding box like a hand-drawn rally course — long sweeping sections
+  // separated by dramatic curves — rather than the noisy doughnut you get
+  // from radial jitter.
+  const N = 64;                       // many control points
+  const baseR = 95;
+  const minR = 50, maxR = 145;
+  // Mixed harmonics. Low orders dominate the gross shape; higher orders
+  // add character. Phases randomized so each track is unique.
+  const harmonics = [
+    { k: 2, amp: 32 + rfloat(rng, -6, 6), phase: rng() * Math.PI * 2 },
+    { k: 3, amp: 18 + rfloat(rng, -4, 4), phase: rng() * Math.PI * 2 },
+    { k: 5, amp:  9 + rfloat(rng, -3, 3), phase: rng() * Math.PI * 2 },
+    { k: 7, amp:  4 + rfloat(rng, -2, 2), phase: rng() * Math.PI * 2 },
+  ];
   const ctrl = [];
   for (let i = 0; i < N; i++) {
-    const a = (i / N) * Math.PI * 2 + rfloat(rng, -0.08, 0.08);
-    const r = baseR + rfloat(rng, -radJitter, radJitter);
+    const a = (i / N) * Math.PI * 2;
+    let r = baseR;
+    for (const h of harmonics) r += h.amp * Math.sin(h.k * a + h.phase);
+    if (r < minR) r = minR;
+    if (r > maxR) r = maxR;
     ctrl.push({ x: Math.cos(a) * r, y: Math.sin(a) * r });
   }
 
-  // One Chaikin pass — barely rounds the polygon corners, keeps the angles.
-  let pts = chaikinClosed(ctrl);
+  // Smooth with multiple Chaikin passes so the curves flow nicely between
+  // the harmonics' inflection points.
+  let pts = ctrl;
+  for (let pass = 0; pass < 2; pass++) pts = chaikinClosed(pts);
 
-  // Fine resampling — 3m between centerline vertices. Many small bends mean
-  // the offset polyline used to build the road ring rarely hits the miter
-  // clamp, so the edges are smooth.
+  // Resample at 3m so the edge ring stays smooth.
   pts = resampleByArc(pts, 3);
 
-  // Track width — 12m base, ±2m variation. Wide enough for a 4-wide grid
-  // (cars 1.8m wide, gaps 1.7m → 14m needed; we force ≥14m near the start).
-  const widthBase = 12;
-  const widthVar  = 2;
+  // Track width — 2× the previous build: 24m base, ±4m. Generous so even
+  // tight curve apexes still feel hospitable.
+  const widthBase = 24;
+  const widthVar  = 4;
   const phase     = rng() * Math.PI * 2;
   const widthFreq = 3 + Math.floor(rng() * 3);
   const widths = pts.map((_, i) => {
     const t = (i / pts.length) * Math.PI * 2;
     return widthBase + Math.sin(t * widthFreq + phase) * widthVar;
   });
-  const startMin = 14;
-  const startRange = 10;
+  // Guarantee a wide pit lane at the start (≥28m) so the 4-wide grid sits
+  // comfortably inside the road.
+  const startMin = 28;
+  const startRange = 14;
   for (let i = 0; i < startRange; i++) {
     const idxBack = (pts.length - i) % pts.length;
     widths[i] = Math.max(widths[i], startMin);

@@ -106,6 +106,41 @@ export class Audio {
     noise.start(t0);
   }
 
+  // Continuous tire screech while drifting. setDriftLevel(0..1) ramps the
+  // intensity; passing 0 silences it. Internally we loop a noise buffer
+  // through a bandpass; gain.value follows the drift coefficient with a
+  // short ramp so transitions don't pop.
+  setDriftLevel(level) {
+    const lvl = Math.max(0, Math.min(1, level || 0));
+    if (lvl < 0.02) {
+      if (this.skidNode) this.skidNode.gain.gain.value = 0;
+      return;
+    }
+    if (!this.skidNode) {
+      const ctx = this.ensure();
+      const buf = ctx.createBuffer(1, ctx.sampleRate * 0.5, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 2500;
+      bp.Q.value = 6;
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      src.connect(bp).connect(gain).connect(ctx.destination);
+      src.start();
+      this.skidNode = { src, bp, gain };
+    }
+    const target = this.muted ? 0 : Math.min(0.22, lvl * 0.22);
+    const ctx = this.skidNode.gain.context;
+    this.skidNode.gain.gain.setTargetAtTime(target, ctx.currentTime, 0.06);
+    // Slight frequency shift with drift intensity for variety.
+    this.skidNode.bp.frequency.setTargetAtTime(1900 + lvl * 1200, ctx.currentTime, 0.1);
+  }
+
   countdown(n) {
     if (this.muted) return;
     this.beep(n === 0 ? 1320 : 660, 0.18, 'sine', n === 0 ? 0.4 : 0.3);

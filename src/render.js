@@ -88,6 +88,13 @@ export class RallyScene {
     this.minimapCtx = null;
     this._minimapRing = null;
 
+    // Skid marks pile up on the road and fade after a while. Stored as a
+    // ring buffer so they're cheap to manage.
+    this.skidGroup = null;
+    this.skidMarks = [];           // { mesh, born }
+    this.skidMaxCount = 220;
+    this.skidLifeSec = 9;
+
     this._currentTrack = null;
   }
 
@@ -129,6 +136,11 @@ export class RallyScene {
 
     this.trackGroup = new THREE.Group();
     this.scene.add(this.trackGroup);
+
+    // Skid marks live outside the track group so they survive a track rebuild
+    // (we clear them explicitly).
+    this.skidGroup = new THREE.Group();
+    this.scene.add(this.skidGroup);
 
     // Minimap 2D overlay.
     const mm = document.getElementById('minimap');
@@ -214,6 +226,22 @@ export class RallyScene {
       if (g.wheels) for (const w of g.wheels) w.rotation.y += wheelDelta;
     }
 
+    // ---- Skid mark lifecycle — fade by remaining life.
+    if (this.skidMarks.length) {
+      const t = performance.now() / 1000;
+      for (let i = this.skidMarks.length - 1; i >= 0; i--) {
+        const s = this.skidMarks[i];
+        const age = t - s.born;
+        if (age >= this.skidLifeSec) {
+          this.skidGroup.remove(s.mesh);
+          this._disposeNode(s.mesh);
+          this.skidMarks.splice(i, 1);
+        } else {
+          s.mesh.material.opacity = Math.max(0, 1 - age / this.skidLifeSec) * 0.55;
+        }
+      }
+    }
+
     for (const cb of this.tickCbs) cb(dt);
     this.renderer.render(this.scene, this.camera);
   }
@@ -238,6 +266,12 @@ export class RallyScene {
       const obj = this.trackGroup.children.pop();
       this._disposeNode(obj);
     }
+    // Fresh track → clear any leftover skid marks.
+    while (this.skidGroup.children.length) {
+      const obj = this.skidGroup.children.pop();
+      this._disposeNode(obj);
+    }
+    this.skidMarks.length = 0;
     for (const mesh of this.pickupMeshes.values()) {
       this.scene.remove(mesh);
       this._disposeNode(mesh);
@@ -418,63 +452,97 @@ export class RallyScene {
     const black  = new THREE.MeshStandardMaterial({ color: 0x0a0c10, metalness: 0.3, roughness: 0.4 });
     const tinted = new THREE.MeshStandardMaterial({ color: 0x0c1018, metalness: 0.7, roughness: 0.1 });
 
-    // Under-chassis slab — 4.5m × 0.2m × 1.8m, centred at y=0.35.
-    const chassis = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.2, 1.8), black);
-    chassis.position.y = 0.35;
+    // ---- Coupe / roadster silhouette: long front (engine bay), short
+    // compact cabin, very short rear deck. Heavily front-heavy look that
+    // matches the RWD power-oversteer feel of the physics.
+    //
+    // Reference: 4.5m long, 1.8m wide. The +X direction is forward.
+
+    // Under-chassis slab.
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.18, 1.8), black);
+    chassis.position.y = 0.32;
     g.add(chassis);
 
-    // Painted bodywork — three sections give a sports-car silhouette.
-    const hood  = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.5, 1.65), paint);
-    hood.position.set(1.3, 0.7, 0);
+    // Front bumper — wraps around the leading edge.
+    const frontBumper = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.45, 1.8), paint);
+    frontBumper.position.set(2.07, 0.55, 0);
+    g.add(frontBumper);
+
+    // LONG hood — dominates the front half.
+    const hood = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.5, 1.7), paint);
+    hood.position.set(1.0, 0.7, 0);
     g.add(hood);
 
-    const mid   = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.8, 1.75), paint);
-    mid.position.set(-0.2, 0.85, 0);
-    g.add(mid);
+    // Cowl / engine bay rise — slightly taller right before the windshield.
+    const cowl = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.65, 1.65), paint);
+    cowl.position.set(0.0, 0.85, 0);
+    g.add(cowl);
 
-    const trunk = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.55, 1.65), paint);
-    trunk.position.set(-1.65, 0.72, 0);
-    g.add(trunk);
-
-    // Cabin (tinted greenhouse).
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.55, 1.45), tinted);
-    cabin.position.set(-0.15, 1.55, 0);
+    // Compact cabin (greenhouse). Set back from the leading edge with a
+    // chopped-roof look — narrower than the body for proper coupe proportions.
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.55, 1.55), paint);
+    cabin.position.set(-0.55, 1.18, 0);
     g.add(cabin);
 
-    // Fender bumps over each wheel arch.
-    const fenderGeom = new THREE.CylinderGeometry(0.42, 0.42, 0.95, 12, 1, false, 0, Math.PI);
-    const wheelPositions = [[-1.4, -0.8], [-1.4, 0.8], [1.4, -0.8], [1.4, 0.8]];
-    for (const [fx, fz] of wheelPositions) {
-      const f = new THREE.Mesh(fenderGeom, paint);
-      f.rotation.x = Math.PI / 2;
-      f.rotation.y = Math.PI;
-      f.position.set(fx, 0.55, fz);
-      g.add(f);
+    // Tinted glass on top of the cabin — slightly inset.
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.4, 1.4), tinted);
+    glass.position.set(-0.55, 1.65, 0);
+    g.add(glass);
+
+    // Short rear deck — drops down behind the cabin like a fastback.
+    const rearDeck = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.45, 1.7), paint);
+    rearDeck.position.set(-1.6, 0.78, 0);
+    g.add(rearDeck);
+
+    // Rear bumper.
+    const rearBumper = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.45, 1.75), paint);
+    rearBumper.position.set(-2.15, 0.55, 0);
+    g.add(rearBumper);
+
+    // Wide front fender flares — emphasise the front end's mass.
+    const frontFenderMat = paint;
+    const frontFenderGeom = new THREE.CylinderGeometry(0.48, 0.48, 1.05, 12, 1, false, 0, Math.PI);
+    for (const fz of [-0.85, 0.85]) {
+      const ff = new THREE.Mesh(frontFenderGeom, frontFenderMat);
+      ff.rotation.x = Math.PI / 2;
+      ff.rotation.y = Math.PI;
+      ff.position.set(1.4, 0.55, fz);
+      g.add(ff);
+    }
+    // Narrower rear haunch.
+    const rearFenderGeom = new THREE.CylinderGeometry(0.42, 0.42, 0.85, 12, 1, false, 0, Math.PI);
+    for (const fz of [-0.82, 0.82]) {
+      const rf = new THREE.Mesh(rearFenderGeom, frontFenderMat);
+      rf.rotation.x = Math.PI / 2;
+      rf.rotation.y = Math.PI;
+      rf.position.set(-1.4, 0.5, fz);
+      g.add(rf);
     }
 
-    // Headlights / tail lights.
+    // Hood scoop (small detail on top of the hood).
+    const scoop = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.12, 0.7), black);
+    scoop.position.set(1.4, 1.01, 0);
+    g.add(scoop);
+
+    // Twin headlights — bright emissive cubes, narrow.
     const hl = new THREE.MeshStandardMaterial({ color: 0xfff0a0, emissive: 0xfff0a0, emissiveIntensity: 1.4, metalness: 0.2, roughness: 0.4 });
-    for (const wz of [-0.55, 0.55]) {
-      const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.22, 0.32), hl);
-      lamp.position.set(2.22, 0.6, wz);
+    for (const wz of [-0.5, 0.5]) {
+      const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.18, 0.36), hl);
+      lamp.position.set(2.24, 0.62, wz);
       g.add(lamp);
     }
+    // Tail lights — full-width strip.
     const tl = new THREE.MeshStandardMaterial({ color: 0xff2030, emissive: 0xff1020, emissiveIntensity: 1.0, roughness: 0.4 });
-    for (const wz of [-0.6, 0.6]) {
-      const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.22, 0.32), tl);
-      lamp.position.set(-2.22, 0.6, wz);
-      g.add(lamp);
-    }
+    const tailStrip = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.18, 1.4), tl);
+    tailStrip.position.set(-2.33, 0.62, 0);
+    g.add(tailStrip);
 
-    // Rear spoiler.
-    const spoiler = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.1, 1.6), black);
-    spoiler.position.set(-2.15, 1.15, 0);
+    // Subtle ducktail spoiler at the back of the deck.
+    const spoiler = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.06, 1.55), black);
+    spoiler.position.set(-2.05, 1.04, 0);
     g.add(spoiler);
-    for (const wz of [-0.55, 0.55]) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.32, 0.1), black);
-      leg.position.set(-2.15, 0.96, wz);
-      g.add(leg);
-    }
+
+    const wheelPositions = [[-1.4, -0.85], [-1.4, 0.85], [1.4, -0.85], [1.4, 0.85]];
 
     // ---- Wheels — 0.35m radius rubber + brighter rim cap.
     const tireMat = new THREE.MeshStandardMaterial({ color: 0x101010, roughness: 0.85 });
@@ -495,6 +563,13 @@ export class RallyScene {
     g.paintMat = paint;
     g.paintColor = colorHex;
     g._wheelSpeed = 0;
+    // Keep the world-space positions of the rear two tyres so we can drop
+    // skid marks behind them when the car is drifting.
+    g._rearWheelOffsets = [
+      { x: -1.4, z: -0.85 },
+      { x: -1.4, z:  0.85 },
+    ];
+    g._lastSkidT = 0;
 
     this.scene.add(g);
     this.carMeshes.set(id, g);
@@ -503,6 +578,30 @@ export class RallyScene {
 
   flashCar(playerId, ms = 200) {
     this.carFlashUntil.set(playerId, performance.now() + ms);
+  }
+
+  // Drop a short black streak on the road behind the rear wheels of a car.
+  // Called by syncCars once per drifting car per frame (rate-limited per car).
+  emitSkidMark(worldX, worldZ, carYaw) {
+    if (this.skidMarks.length >= this.skidMaxCount) {
+      // Recycle the oldest.
+      const oldest = this.skidMarks.shift();
+      this.skidGroup.remove(oldest.mesh);
+      this._disposeNode(oldest.mesh);
+    }
+    const geom = new THREE.PlaneGeometry(0.55, 0.18);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x080808,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.rotation.z = carYaw;
+    mesh.position.set(worldX, 0.08, worldZ);
+    this.skidGroup.add(mesh);
+    this.skidMarks.push({ mesh, born: performance.now() / 1000 });
   }
 
   syncCars(state, t) {
@@ -528,6 +627,21 @@ export class RallyScene {
 
       // Cache speed so the wheel-roll tick can spin wheels at the right rate.
       g._wheelSpeed = Math.hypot(car.vx, car.vy);
+
+      // Skid marks behind the rear wheels when actively drifting and moving.
+      if ((car.drift || 0) > 0.35 && g._wheelSpeed > 4) {
+        const tNow = performance.now() / 1000;
+        if (tNow - (g._lastSkidT || 0) > 0.045) {
+          g._lastSkidT = tNow;
+          // Body-space rear wheel offsets → world space via the car's yaw.
+          const cosA = Math.cos(car.a), sinA = Math.sin(car.a);
+          for (const off of g._rearWheelOffsets) {
+            const wx = car.x + off.x * cosA - off.z * sinA;
+            const wz = car.y + off.x * sinA + off.z * cosA;
+            this.emitSkidMark(wx, wz, car.a);
+          }
+        }
+      }
 
       // Boost trail — sparks just behind the exhaust.
       if (car.boost > 0 && Math.random() < 0.7) {

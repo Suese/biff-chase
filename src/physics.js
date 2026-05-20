@@ -173,40 +173,51 @@ export function stepCar(body, dt) {
     fwdSpeed *= Math.pow(0.99, dt * 60);     // gentler off-throttle decay
   }
 
-  // ---- Grip (lateral friction) — the heart of the drift feel.
-  // Base grip is reduced as drift builds (positive feedback), and crushed
-  // by handbrake / oil. Power-oversteer near top speed.
-  let grip = stats.grip * (1.0 - drift * 0.65);
-  if (input.brake) grip *= 0.18;
-  if (body.oiled > 0) grip *= 0.35;
-  if (input.up && fwdSpeed > 0.75 * maxSpeed) grip *= 0.78;
+  // ---- Bicycle-model RWD grip. Treat the car as two axles separated by a
+  // wheelbase; the lateral velocity at each axle is decayed by that axle's
+  // grip. Front grip is higher (steering bite) while rear grip is lower
+  // and falls off fast under throttle / handbrake / drift — classic
+  // rear-wheel-drive oversteer. The yaw moment that emerges from front-
+  // vs-rear slip mismatch is added back into the chassis angular velocity.
+  const halfWB = 1.4;       // half-wheelbase in metres (≈ 2.8m total)
+  const omegaSec = body.angularVelocity / dt;
+  const latFront = latSpeed + omegaSec * halfWB;
+  const latRear  = latSpeed - omegaSec * halfWB;
 
-  // Lateral velocity decay — exponential per-step, scaled to dt.
-  const latDecay = Math.min(1, grip * dt * 14);
-  latSpeed *= (1 - latDecay);
+  let gripF = stats.grip * 1.30 * (1.0 - drift * 0.25);
+  let gripR = stats.grip * 0.75 * (1.0 - drift * 0.65);
+  if (input.brake) gripR *= 0.18;                                 // handbrake
+  if (input.up && fwdSpeed > 0.5 * maxSpeed) gripR *= 0.70;       // power oversteer
+  if (body.oiled > 0) { gripF *= 0.40; gripR *= 0.40; }
 
-  // Hand back to Matter (per-step units).
+  const decayF = Math.min(1, gripF * dt * 14);
+  const decayR = Math.min(1, gripR * dt * 14);
+  const newLatF = latFront * (1 - decayF);
+  const newLatR = latRear  * (1 - decayR);
+
+  const newLatSpeed = (newLatF + newLatR) * 0.5;
+  const omegaFromAxles = (newLatF - newLatR) / (2 * halfWB);
+
+  // Hand back to Matter — lateral velocity recomposed with forward speed.
   Matter.Body.setVelocity(body, {
-    x: (fwdSpeed * fx + latSpeed * nx) * dt,
-    y: (fwdSpeed * fy + latSpeed * ny) * dt,
+    x: (fwdSpeed * fx + newLatSpeed * nx) * dt,
+    y: (fwdSpeed * fy + newLatSpeed * ny) * dt,
   });
 
-  // ---- Steering. A stationary car can't pivot — angular velocity is
-  // bounded by ω = v / R_min (the geometry of a real wheel turning), so it
-  // smoothly ramps from 0 at standstill up to stats.turnSpeed at higher
-  // speeds. Drift gives a counter-steer authority bonus so fishtail
-  // recovery stays responsive.
-  const minTurnRadius = 5;        // metres — tight rally turn radius
+  // ---- Steering. A stationary car can't pivot (ω = v / R), and we blend
+  // a fraction of the bicycle-model yaw on top so the rear slide actually
+  // rotates the body during a drift.
+  const minTurnRadius = 5;
   const omegaFromSpeed = Math.abs(fwdSpeed) / minTurnRadius;
   const omegaCap = Math.min(stats.turnSpeed, omegaFromSpeed);
-  const driftBonus = 1.0 + drift * 0.55;
   let steer = (input.left ? -1 : 0) + (input.right ? 1 : 0);
   if (fwdSpeed < -1) steer *= -1;
-  const angVel = steer * omegaCap * driftBonus * oiledMul;
-  Matter.Body.setAngularVelocity(body, angVel * dt);
+  const omegaTarget = steer * omegaCap * (1 + drift * 0.45) * oiledMul;
+  const newOmega = omegaTarget + omegaFromAxles * 0.45;
+  Matter.Body.setAngularVelocity(body, newOmega * dt);
 
   body._fwdSpeed = fwdSpeed;
-  body._latSpeed = latSpeed;
+  body._latSpeed = newLatSpeed;
   body._drift = drift;
 
   if (body.boost > 0) body.boost = Math.max(0, body.boost - dt);
@@ -315,7 +326,7 @@ export function respawnCar(body, x, y, angle) {
 // velocity in per-STEP units, so we scale at this boundary.
 
 export function carSnapshot(body) {
-  const stepRate = 1 / FIXED_DT;   // 60 if FIXED_DT = 1/60
+  const stepRate = 1 / FIXED_DT;
   return {
     id: body.ownerId,
     x: body.position.x,
@@ -330,6 +341,7 @@ export function carSnapshot(body) {
     armor: body.armor,
     alive: body.alive,
     respawnIn: body.respawnIn,
+    drift: body._drift || 0,
   };
 }
 
