@@ -10,11 +10,40 @@ import { WATER, LAND, FOREST, MOUNTAIN } from './terrain.js';
 
 // ---- Materials shared across every cell of a given biome / road type.
 
+// Multiple grass / forest / mountain shades so cells of the same biome
+// don't read as a flat checkerboard. The renderer picks one per cell from
+// a stable hash of (gx, gy).
+const GRASS_MATS = [
+  new THREE.MeshStandardMaterial({ color: 0x3e5e2c, roughness: 0.95, metalness: 0.0 }),
+  new THREE.MeshStandardMaterial({ color: 0x466428, roughness: 0.95, metalness: 0.0 }),
+  new THREE.MeshStandardMaterial({ color: 0x365524, roughness: 0.92, metalness: 0.0 }),
+  new THREE.MeshStandardMaterial({ color: 0x4a6a30, roughness: 0.94, metalness: 0.0 }),
+];
+const FOREST_GROUND_MATS = [
+  new THREE.MeshStandardMaterial({ color: 0x254a1e, roughness: 0.93, metalness: 0.0 }),
+  new THREE.MeshStandardMaterial({ color: 0x2e5224, roughness: 0.94, metalness: 0.0 }),
+  new THREE.MeshStandardMaterial({ color: 0x1e4218, roughness: 0.92, metalness: 0.0 }),
+];
+const MOUNTAIN_GROUND_MATS = [
+  new THREE.MeshStandardMaterial({ color: 0x6e6862, roughness: 0.85, metalness: 0.05 }),
+  new THREE.MeshStandardMaterial({ color: 0x7a7470, roughness: 0.86, metalness: 0.05 }),
+  new THREE.MeshStandardMaterial({ color: 0x5e5854, roughness: 0.82, metalness: 0.05 }),
+];
+const WATER_GROUND_MAT = new THREE.MeshStandardMaterial({ color: 0x1a2c46, roughness: 0.5, metalness: 0.1 });
+const WATER_SURF_MAT = new THREE.MeshStandardMaterial({
+  color: 0x3a6a98, roughness: 0.06, metalness: 0.45, transparent: true, opacity: 0.85,
+  emissive: 0x102540, emissiveIntensity: 0.08,
+});
+const SAND_MAT = new THREE.MeshStandardMaterial({ color: 0xcab880, roughness: 0.95, metalness: 0.0 });
+const ROAD_WALL_MAT = new THREE.MeshStandardMaterial({ color: 0xb0aaa0, roughness: 0.7, metalness: 0.1 });
+const ROAD_WALL_STRIPE_MAT = new THREE.MeshStandardMaterial({ color: 0xff3a3a, roughness: 0.6, metalness: 0.1 });
+
+// Backwards-compat — code that referenced BIOME_MATS still resolves.
 const BIOME_MATS = {
-  [WATER]:    new THREE.MeshStandardMaterial({ color: 0x1e3a5c, roughness: 0.30, metalness: 0.10, emissive: 0x102030, emissiveIntensity: 0.10 }),
-  [LAND]:     new THREE.MeshStandardMaterial({ color: 0x3a5828, roughness: 0.95, metalness: 0.00 }),
-  [FOREST]:   new THREE.MeshStandardMaterial({ color: 0x244c20, roughness: 0.92, metalness: 0.00 }),
-  [MOUNTAIN]: new THREE.MeshStandardMaterial({ color: 0x6e6862, roughness: 0.85, metalness: 0.05 }),
+  [WATER]:    WATER_GROUND_MAT,
+  [LAND]:     GRASS_MATS[0],
+  [FOREST]:   FOREST_GROUND_MATS[0],
+  [MOUNTAIN]: MOUNTAIN_GROUND_MATS[0],
 };
 const ROAD_MATS = {
   pavement: new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.88, metalness: 0.05 }),
@@ -26,16 +55,56 @@ const TRUNK_MAT = new THREE.MeshStandardMaterial({ color: 0x3a2418, roughness: 0
 const FOLIAGE_MAT = new THREE.MeshStandardMaterial({ color: 0x1f5024, roughness: 0.85, metalness: 0.0 });
 const ROCK_MAT = new THREE.MeshStandardMaterial({ color: 0x8a8780, roughness: 0.85, metalness: 0.05 });
 
-// Geometries — shared so all tile instances of one shape batch together.
+// Shared geometries — each instance reuses these so the GPU batches them.
 const tileGeoms = {
-  ground: new THREE.BoxGeometry(CELL_SIZE, 0.4, CELL_SIZE),
-  road:   new THREE.BoxGeometry(CELL_SIZE, 0.22, CELL_SIZE),
-  dash:   new THREE.BoxGeometry(CELL_SIZE * 0.45, 0.05, 0.18),
-  trunk:  new THREE.CylinderGeometry(0.18, 0.22, 1.4, 6),
-  foliage: new THREE.ConeGeometry(1.0, 2.4, 7),
-  rock:   new THREE.ConeGeometry(2.2, 4.2, 5),
-  water:  new THREE.BoxGeometry(CELL_SIZE * 1.001, 0.05, CELL_SIZE * 1.001),
+  ground:    new THREE.BoxGeometry(CELL_SIZE, 0.4, CELL_SIZE),
+  road:      new THREE.BoxGeometry(CELL_SIZE, 0.22, CELL_SIZE),
+  dash:      new THREE.BoxGeometry(CELL_SIZE * 0.45, 0.05, 0.18),
+  water:     new THREE.BoxGeometry(CELL_SIZE * 1.001, 0.05, CELL_SIZE * 1.001),
+  // Tree variants (trunk + 1–3 foliage cones for variety).
+  trunkSmall:  new THREE.CylinderGeometry(0.15, 0.18, 1.1, 6),
+  trunkBig:    new THREE.CylinderGeometry(0.22, 0.28, 1.6, 6),
+  foliageNarrow: new THREE.ConeGeometry(0.9, 2.6, 7),
+  foliageWide:   new THREE.ConeGeometry(1.2, 2.2, 8),
+  foliageRound:  new THREE.SphereGeometry(0.95, 8, 6),
+  // Mountain peaks (cone variants for visual variety).
+  peakTall:   new THREE.ConeGeometry(1.8, 5.2, 5),
+  peakShort:  new THREE.ConeGeometry(2.4, 3.4, 6),
+  peakJagged: new THREE.ConeGeometry(1.5, 4.4, 4),
+  // Boulder / rock cluster bits.
+  boulder:    new THREE.DodecahedronGeometry(0.5),
+  pebble:     new THREE.DodecahedronGeometry(0.28),
+  // Grass clumps.
+  grassTuft: new THREE.ConeGeometry(0.22, 0.45, 5),
+  flower:    new THREE.SphereGeometry(0.15, 5, 4),
+  // Road walls — short barriers + red kerb stripe sitting on top.
+  wall:      new THREE.BoxGeometry(CELL_SIZE, 0.6, 0.28),
+  wallTop:   new THREE.BoxGeometry(CELL_SIZE, 0.1, 0.32),
+  // Shoreline sand strip — runs along a cell edge.
+  sandStrip: new THREE.BoxGeometry(CELL_SIZE, 0.06, 0.8),
 };
+
+const FLOWER_MATS = [
+  new THREE.MeshStandardMaterial({ color: 0xffcc55, roughness: 0.7 }),
+  new THREE.MeshStandardMaterial({ color: 0xff5599, roughness: 0.7 }),
+  new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.7 }),
+];
+const GRASS_TUFT_MAT = new THREE.MeshStandardMaterial({ color: 0x6ea042, roughness: 0.9 });
+const BOULDER_MAT = new THREE.MeshStandardMaterial({ color: 0x96928c, roughness: 0.85, metalness: 0.05 });
+
+// Stable per-cell hash for picking variants.
+function cellHash(gx, gy, salt = 0) {
+  let h = (gx + 1000) * 73856093 ^ (gy + 1000) * 19349663 ^ salt * 83492791;
+  h = (h ^ (h >>> 13)) * 0x5bd1e995;
+  h = h ^ (h >>> 15);
+  return (h >>> 0);
+}
+function pickVariant(gx, gy, salt, count) {
+  return cellHash(gx, gy, salt) % count;
+}
+function unit01(gx, gy, salt) {
+  return (cellHash(gx, gy, salt) % 10000) / 10000;
+}
 
 function lerpColor(a, b, t) {
   const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
@@ -433,65 +502,191 @@ export class RallyScene {
     }
   }
 
-  // Build the BIOME GROUND layer — one mesh per non-road cell. The ground
-  // sits slightly below the road surface so the road reads as raised on
-  // top. Mountains add a rock cone, forest adds a couple of low trees,
-  // water lowers the ground a few cm and lays a translucent water plane.
+  // Build the BIOME GROUND layer. Each biome has multiple shade variants
+  // picked deterministically per cell, plus on-cell decorations (trees,
+  // peaks, pebbles, flowers) that all read from the same per-cell hash so
+  // a regenerated track lays out identically. Boundary cells also get
+  // transition decorations (sand at water edges, bushes at forest edges,
+  // pebbles at mountain feet).
   _buildBiomeGround(track) {
     const cells = track.biomeCells;
-    // Per-biome temporary lists for batching by material.
+    // Build a lookup so transition code can read neighbour biomes.
+    const biomeAt = new Map();
+    for (const c of cells) biomeAt.set(`${c.gx},${c.gy}`, c);
+    const lookup = (gx, gy) => biomeAt.get(`${gx},${gy}`);
+
     for (const c of cells) {
       if (c.isRoad) continue;
-      const mat = BIOME_MATS[c.biome] || BIOME_MATS[LAND];
-      // Slight per-cell jitter in height so neighbouring cells of the same
-      // biome don't look like a flat checkerboard.
-      const elevBoost = c.biome === MOUNTAIN ? 1.4
-                      : c.biome === FOREST ? 0.05
-                      : c.biome === WATER ? -0.55
-                      : 0.0;
+
+      // Per-cell variant picks + decorative seed values.
+      const variant = pickVariant(c.gx, c.gy, 1, 4);
+      const elevJitter = (unit01(c.gx, c.gy, 5) - 0.5) * 0.18;
+
+      let mat;
+      let elevBoost;
+      switch (c.biome) {
+        case MOUNTAIN: mat = MOUNTAIN_GROUND_MATS[variant % MOUNTAIN_GROUND_MATS.length]; elevBoost = 1.4; break;
+        case FOREST:   mat = FOREST_GROUND_MATS[variant % FOREST_GROUND_MATS.length];   elevBoost = 0.05; break;
+        case WATER:    mat = WATER_GROUND_MAT;                                          elevBoost = -0.55; break;
+        default:       mat = GRASS_MATS[variant % GRASS_MATS.length];                   elevBoost = 0;     break;
+      }
       const ground = new THREE.Mesh(tileGeoms.ground, mat);
-      ground.position.set(c.cx, -0.20 + elevBoost, c.cy);
+      ground.position.set(c.cx, -0.20 + elevBoost + elevJitter, c.cy);
+      ground.rotation.y = (variant * Math.PI / 2);
       this.trackGroup.add(ground);
 
-      // Decorations per biome.
-      if (c.biome === FOREST) {
-        // Place 1–2 trees in the cell, slightly offset.
-        const offs = [
-          { x: -0.7,  z: -0.4 },
-          { x:  0.6,  z:  0.7 },
-        ];
-        for (let i = 0; i < (((c.gx * 7 + c.gy * 13) % 3) >= 1 ? 2 : 1); i++) {
-          const o = offs[i];
-          const trunk = new THREE.Mesh(tileGeoms.trunk, TRUNK_MAT);
-          trunk.position.set(c.cx + o.x, 0.7, c.cy + o.z);
+      // ---- Decorations per biome.
+      if (c.biome === LAND) {
+        // A handful of grass tufts. The deterministic hash decides if this
+        // cell is "dressed" (has flowers / extra tufts) or plain.
+        const tufts = pickVariant(c.gx, c.gy, 11, 4);          // 0..3 tufts
+        for (let i = 0; i < tufts; i++) {
+          const sx = (unit01(c.gx, c.gy, 30 + i) - 0.5) * 2.6;
+          const sz = (unit01(c.gx, c.gy, 60 + i) - 0.5) * 2.6;
+          const tuft = new THREE.Mesh(tileGeoms.grassTuft, GRASS_TUFT_MAT);
+          tuft.position.set(c.cx + sx, 0.20, c.cy + sz);
+          tuft.rotation.y = unit01(c.gx, c.gy, 90 + i) * Math.PI;
+          this.trackGroup.add(tuft);
+        }
+        // Occasional flower patch.
+        if (pickVariant(c.gx, c.gy, 17, 6) === 0) {
+          const fmat = FLOWER_MATS[pickVariant(c.gx, c.gy, 18, FLOWER_MATS.length)];
+          for (let i = 0; i < 3; i++) {
+            const sx = (unit01(c.gx, c.gy, 100 + i) - 0.5) * 2.0;
+            const sz = (unit01(c.gx, c.gy, 130 + i) - 0.5) * 2.0;
+            const f = new THREE.Mesh(tileGeoms.flower, fmat);
+            f.position.set(c.cx + sx, 0.32, c.cy + sz);
+            this.trackGroup.add(f);
+          }
+        }
+      } else if (c.biome === FOREST) {
+        // 2–4 trees with mixed trunk/foliage variants.
+        const treeCount = 2 + pickVariant(c.gx, c.gy, 41, 3);
+        for (let i = 0; i < treeCount; i++) {
+          const sx = (unit01(c.gx, c.gy, 200 + i * 17) - 0.5) * 2.6;
+          const sz = (unit01(c.gx, c.gy, 240 + i * 19) - 0.5) * 2.6;
+          const bigTrunk = pickVariant(c.gx, c.gy, 270 + i, 2) === 0;
+          const trunk = new THREE.Mesh(bigTrunk ? tileGeoms.trunkBig : tileGeoms.trunkSmall, TRUNK_MAT);
+          const trunkH = bigTrunk ? 0.8 : 0.55;
+          trunk.position.set(c.cx + sx, trunkH, c.cy + sz);
           this.trackGroup.add(trunk);
-          const foliage = new THREE.Mesh(tileGeoms.foliage, FOLIAGE_MAT);
-          foliage.position.set(c.cx + o.x, 2.1, c.cy + o.z);
+          const foliageKind = pickVariant(c.gx, c.gy, 290 + i, 3);
+          const foliageGeom = foliageKind === 0 ? tileGeoms.foliageNarrow
+                            : foliageKind === 1 ? tileGeoms.foliageWide
+                            : tileGeoms.foliageRound;
+          const foliage = new THREE.Mesh(foliageGeom, FOLIAGE_MAT);
+          foliage.position.set(c.cx + sx, bigTrunk ? 2.5 : 2.0, c.cy + sz);
           this.trackGroup.add(foliage);
         }
       } else if (c.biome === MOUNTAIN) {
-        const rock = new THREE.Mesh(tileGeoms.rock, ROCK_MAT);
-        // Deterministic small jitter to make the peaks varied.
-        const jx = ((c.gx * 1664525 + c.gy * 1013904223) % 100) / 100 - 0.5;
-        const jz = ((c.gx * 22695477 + c.gy * 89067) % 100) / 100 - 0.5;
-        rock.position.set(c.cx + jx * 0.8, 1.4, c.cy + jz * 0.8);
-        rock.rotation.y = jx * Math.PI;
-        this.trackGroup.add(rock);
+        // Pick a peak variant; add a couple of scattered boulders too.
+        const peakKind = pickVariant(c.gx, c.gy, 60, 3);
+        const peakGeom = peakKind === 0 ? tileGeoms.peakTall
+                        : peakKind === 1 ? tileGeoms.peakShort
+                        : tileGeoms.peakJagged;
+        const peak = new THREE.Mesh(peakGeom, ROCK_MAT);
+        const jx = (unit01(c.gx, c.gy, 81) - 0.5) * 0.6;
+        const jz = (unit01(c.gx, c.gy, 82) - 0.5) * 0.6;
+        peak.position.set(c.cx + jx, 1.8, c.cy + jz);
+        peak.rotation.y = unit01(c.gx, c.gy, 83) * Math.PI;
+        this.trackGroup.add(peak);
+        if (pickVariant(c.gx, c.gy, 84, 3) > 0) {
+          const b = new THREE.Mesh(tileGeoms.boulder, BOULDER_MAT);
+          const bx = (unit01(c.gx, c.gy, 85) - 0.5) * 2.4;
+          const bz = (unit01(c.gx, c.gy, 86) - 0.5) * 2.4;
+          b.position.set(c.cx + bx, 1.6, c.cy + bz);
+          b.rotation.y = unit01(c.gx, c.gy, 87) * Math.PI;
+          b.rotation.x = unit01(c.gx, c.gy, 88) * Math.PI;
+          this.trackGroup.add(b);
+        }
       } else if (c.biome === WATER) {
-        const surf = new THREE.Mesh(
-          tileGeoms.water,
-          new THREE.MeshStandardMaterial({
-            color: 0x4078a0,
-            roughness: 0.05,
-            metalness: 0.4,
-            transparent: true,
-            opacity: 0.85,
-          }),
-        );
+        const surf = new THREE.Mesh(tileGeoms.water, WATER_SURF_MAT);
         surf.position.set(c.cx, -0.10, c.cy);
         this.trackGroup.add(surf);
       }
+
+      // ---- Transition decorations at biome edges.
+      // For each cardinal neighbour with a DIFFERENT biome, add a small
+      // strip / detail along that edge (and only one half-cell thick so
+      // it sits on the present cell's side of the boundary).
+      const tDirs = [
+        { dx: 0, dy: -1, side: 'N' }, { dx: 1, dy: 0, side: 'E' },
+        { dx: 0, dy:  1, side: 'S' }, { dx: -1, dy: 0, side: 'W' },
+      ];
+      for (const d of tDirs) {
+        const n = lookup(c.gx + d.dx, c.gy + d.dy);
+        if (!n) continue;
+        if (n.biome === c.biome) continue;
+        // Sand on the LAND side of land-water transitions.
+        if (c.biome === LAND && n.biome === WATER) {
+          this._edgeStrip(c, d, SAND_MAT, tileGeoms.sandStrip, 0.05);
+        }
+        // Forest cells with a land/road neighbour get a bushy strip.
+        if (c.biome === FOREST && (n.biome === LAND || n.isRoad)) {
+          for (let i = -1; i <= 1; i++) {
+            const offset = i * 1.0;
+            const along = (d.dx !== 0)
+              ? { x: d.dx * (CELL_SIZE / 2 - 0.45), z: offset }
+              : { x: offset, z: d.dy * (CELL_SIZE / 2 - 0.45) };
+            const f = new THREE.Mesh(tileGeoms.foliageRound, FOLIAGE_MAT);
+            f.position.set(c.cx + along.x, 0.65, c.cy + along.z);
+            f.scale.setScalar(0.55);
+            this.trackGroup.add(f);
+          }
+        }
+        // Mountain feet get scattered pebbles when neighbouring land / forest.
+        if (c.biome === MOUNTAIN && (n.biome === LAND || n.biome === FOREST)) {
+          for (let i = -1; i <= 1; i++) {
+            const offset = i * 1.1;
+            const along = (d.dx !== 0)
+              ? { x: d.dx * (CELL_SIZE / 2 - 0.35), z: offset }
+              : { x: offset, z: d.dy * (CELL_SIZE / 2 - 0.35) };
+            const p = new THREE.Mesh(tileGeoms.pebble, BOULDER_MAT);
+            p.position.set(c.cx + along.x, 0.16, c.cy + along.z);
+            this.trackGroup.add(p);
+          }
+        }
+      }
     }
+
+    // ---- Road walls. For each road cell, place a wall along every cardinal
+    // boundary that is NOT another road cell. Walls are short concrete barriers
+    // with a red top kerb.
+    const roadSet = new Set();
+    for (const p of track.tilePlacements || []) roadSet.add(`${p.gx},${p.gy}`);
+    for (const p of track.tilePlacements || []) {
+      const dirs = [
+        { dx: 0, dy: -1, rotY: 0,             along: 'x' },
+        { dx: 1, dy: 0,  rotY: Math.PI / 2,   along: 'z' },
+        { dx: 0, dy: 1,  rotY: 0,             along: 'x' },
+        { dx: -1, dy: 0, rotY: Math.PI / 2,   along: 'z' },
+      ];
+      for (const d of dirs) {
+        if (roadSet.has(`${p.gx + d.dx},${p.gy + d.dy}`)) continue;
+        const wall = new THREE.Mesh(tileGeoms.wall, ROAD_WALL_MAT);
+        const wallX = p.cx + d.dx * (CELL_SIZE / 2 - 0.14);
+        const wallZ = p.cy + d.dy * (CELL_SIZE / 2 - 0.14);
+        wall.position.set(wallX, 0.42, wallZ);
+        wall.rotation.y = d.rotY;
+        this.trackGroup.add(wall);
+        // Red kerb stripe on top.
+        const top = new THREE.Mesh(tileGeoms.wallTop, ROAD_WALL_STRIPE_MAT);
+        top.position.set(wallX, 0.77, wallZ);
+        top.rotation.y = d.rotY;
+        this.trackGroup.add(top);
+      }
+    }
+  }
+
+  // Helper for one-edge transition strips (e.g. shoreline sand).
+  _edgeStrip(c, dir, mat, geom, y) {
+    const strip = new THREE.Mesh(geom, mat);
+    const along = (dir.dx !== 0)
+      ? { x: dir.dx * (CELL_SIZE / 2 - 0.4), z: 0 }
+      : { x: 0, z: dir.dy * (CELL_SIZE / 2 - 0.4) };
+    strip.position.set(c.cx + along.x, y, c.cy + along.z);
+    strip.rotation.y = (dir.dx !== 0) ? Math.PI / 2 : 0;
+    this.trackGroup.add(strip);
   }
 
   // Build one road tile (plate + tile-shape-specific markings).
