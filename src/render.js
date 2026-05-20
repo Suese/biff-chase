@@ -2,6 +2,7 @@
 // PBR-lit 3D primitives. Gameplay/physics stays 2D; (x, y) → (x, 0, y).
 
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { PLAYER_COLORS } from './colors.js';
 import { ITEMS } from './items.js';
 
@@ -113,6 +114,17 @@ export class RallyScene {
     this.scene = new THREE.Scene();
     // Fog in metres: starts at ~110m out, vanishes by 300m.
     this.scene.fog = new THREE.Fog(0x0a0e16, 110, 300);
+
+    // ---- Image-Based Lighting from Three.js's prebaked RoomEnvironment.
+    // Pre-filtered into a PMREM cubemap so every MeshStandardMaterial /
+    // MeshPhysicalMaterial in the scene picks up soft, broadband ambient
+    // reflections. This is what makes the car paint actually look like
+    // glossy lacquer instead of flat plastic.
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    pmrem.compileEquirectangularShader();
+    const envScene = new RoomEnvironment(this.renderer);
+    this.scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+    pmrem.dispose();
 
     this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.5, 800);
     this.camera.position.set(0, 60, 16);
@@ -448,9 +460,37 @@ export class RallyScene {
     g = new THREE.Group();
     const colorHex = parseInt(PLAYER_COLORS[colorIdx % PLAYER_COLORS.length].replace('#', ''), 16);
 
-    const paint  = new THREE.MeshStandardMaterial({ color: colorHex, metalness: 0.55, roughness: 0.35, emissive: colorHex, emissiveIntensity: 0.04 });
-    const black  = new THREE.MeshStandardMaterial({ color: 0x0a0c10, metalness: 0.3, roughness: 0.4 });
-    const tinted = new THREE.MeshStandardMaterial({ color: 0x0c1018, metalness: 0.7, roughness: 0.1 });
+    // Glossy automotive paint: pigment + clearcoat layer that reflects the
+    // PMREM environment map. envMapIntensity dialled up so the reflection
+    // really pops on a dark track.
+    const paint  = new THREE.MeshPhysicalMaterial({
+      color: colorHex,
+      metalness: 0.6,
+      roughness: 0.22,
+      clearcoat: 0.95,
+      clearcoatRoughness: 0.10,
+      envMapIntensity: 1.4,
+      emissive: colorHex,
+      emissiveIntensity: 0.03,
+    });
+    const black  = new THREE.MeshPhysicalMaterial({
+      color: 0x0a0c10,
+      metalness: 0.5,
+      roughness: 0.35,
+      clearcoat: 0.4,
+      clearcoatRoughness: 0.2,
+      envMapIntensity: 1.0,
+    });
+    // Tinted glass — high reflective, smooth, dark base; envmap really sells it.
+    const tinted = new THREE.MeshPhysicalMaterial({
+      color: 0x0a0e16,
+      metalness: 0.0,
+      roughness: 0.05,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.04,
+      transmission: 0.0,
+      envMapIntensity: 1.6,
+    });
 
     // ---- Coupe / roadster silhouette: long front (engine bay), short
     // compact cabin, very short rear deck. Heavily front-heavy look that
