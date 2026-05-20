@@ -131,7 +131,14 @@ async function startHost() {
     if (!action) return;
     if (action.name === 'join') {
       room.addPlayer(fromId, action.value);
-      host.sendTo(fromId, { type: 'state', state: room.snapshot({ includeTrack: true }) });
+      // Stamp the joining client with the id the HOST is using for them. The
+      // client adopts this as their canonical `myId`. Eliminates an entire
+      // class of "client thinks its id is X, host knows them as Y" bugs.
+      host.sendTo(fromId, {
+        type: 'state',
+        youId: fromId,
+        state: room.snapshot({ includeTrack: true }),
+      });
     } else {
       room.handleAction(fromId, action);
     }
@@ -176,6 +183,13 @@ async function startClient() {
   }
   client.on('message', (msg) => {
     if (!msg || typeof msg !== 'object') return;
+    // The host stamps `youId` into the join-response state so we adopt the id
+    // it knows us by — guards against any PeerJS edge where our locally-cached
+    // peer.id differs from what reached the host as conn.peer.
+    if (msg.type === 'state' && msg.youId && msg.youId !== myId) {
+      console.log(`[net] host says my id is ${msg.youId} (had ${myId})`);
+      myId = msg.youId;
+    }
     if (msg.type === 'state') applyState(msg.state);
     else if (msg.type === 'event') applyEvent(msg.event);
   });
@@ -408,25 +422,6 @@ window.addEventListener('keydown', () => {
   });
 });
 
-// Live debug panel — top-left, shows what the local client thinks the world
-// looks like. Useful for spotting "Player 2 sees only 1 car" bugs at a glance.
-function updateDebugPanel() {
-  const el = document.getElementById('debug-panel');
-  if (!el) return;
-  if (!lastState) { el.textContent = ''; return; }
-  const me = (myId || '').slice(0, 6);
-  const players = (lastState.players || []).map(p =>
-    `${p.id === myId ? '★' : ' '} ${(p.id || '').slice(0, 6)}  ${p.name}`
-  ).join('\n');
-  const cars = (lastState.cars || []).map(c =>
-    `${c.id === myId ? '★' : ' '} ${(c.id || '').slice(0, 6)}  pos=(${Math.round(c.x)},${Math.round(c.y)})  alive=${c.alive}`
-  ).join('\n');
-  el.textContent =
-    `me=${me} mode=${mode} phase=${lastState.phase}\n` +
-    `players (${(lastState.players || []).length}):\n${players || '  —'}\n` +
-    `cars (${(lastState.cars || []).length}):\n${cars || '  —'}`;
-}
-
 function angleDelta(a, b) {
   let d = b - a;
   while (d > Math.PI) d -= Math.PI * 2;
@@ -438,7 +433,6 @@ function angleDelta(a, b) {
 let countdownLastSec = -1;
 onGameTick((dt) => {
   if (!lastState) return;
-  updateDebugPanel();
   if (!_sceneReady) return;     // canvas isn't up yet — skip rendering
 
   // Dead-reckon all cars by their last reported velocity. This carries the
@@ -457,7 +451,7 @@ onGameTick((dt) => {
   if (interpCars.has(myId)) cam = interpCars.get(myId);
   else if (interpCars.size > 0) cam = interpCars.values().next().value;
   if (cam) scene.setCameraTarget(cam.x, cam.y);
-  scene.setZoom(0.65);    // wider view so we can see other cars
+  scene.setZoom(0.65);
 
   // Draw cars + pickups + hazards using interpolated state
   const dispState = lastState;

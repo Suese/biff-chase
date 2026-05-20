@@ -95,9 +95,7 @@ export class GameRoom {
       // can render it before they see their car.
       this._lastBroadcastTrackSeed = null;
     }
-    const msg = `[room] addPlayer id=${shortId(id)} phase=${this.phase} totalPlayers=${this.players.length} hasCar=${this.cars.has(id)}`;
-    console.log(msg);
-    this.emitEvent({ type: 'log', text: msg, kind: 'win' });
+    console.log(`[room] addPlayer id=${shortId(id)} phase=${this.phase} totalPlayers=${this.players.length} hasCar=${this.cars.has(id)}`);
     this.emitState();
     this.emitEvent({ type: 'log', text: `${name} joined.` });
   }
@@ -120,9 +118,7 @@ export class GameRoom {
     const ent = makeCarEntity({ body, driverId: playerId, driverName: playerName });
     this.ecs.addEntity(ent);
     this.carEntities.set(playerId, ent);
-    const msg = `[room] spawn id=${shortId(playerId)} idx=${idx} pos=(${Math.round(slot.x)},${Math.round(slot.y)}) totalCars=${this.cars.size}`;
-    console.log(msg);
-    this.emitEvent({ type: 'log', text: msg, kind: 'win' });
+    console.log(`[room] spawn id=${shortId(playerId)} idx=${idx} pos=(${Math.round(slot.x)},${Math.round(slot.y)}) totalCars=${this.cars.size}`);
   }
 
   removePlayer(id) {
@@ -178,9 +174,7 @@ export class GameRoom {
     this.cars.clear();
 
     this.players.forEach((p) => this._spawnCarForPlayer(p.id, p.name));
-    const msg = `[room] beginRace players=${this.players.length} cars=${this.cars.size} entities=${this.carEntities.size}`;
-    console.log(msg);
-    this.emitEvent({ type: 'log', text: msg, kind: 'win' });
+    console.log(`[room] beginRace players=${this.players.length} cars=${this.cars.size} entities=${this.carEntities.size}`);
 
     // Pickups
     const rng = mulberry32(seed ^ 0xCAFEBABE);

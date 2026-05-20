@@ -167,16 +167,17 @@ function normalize(v) {
 }
 
 // Helper: place N cars on the grid behind the start line, staggered F1-style.
+// Lateral spread is wide enough that two cars never visually merge.
 export function gridSpawnPositions(track, count) {
   const { start } = track;
   const slots = [];
-  const colSpacing = 60;
-  const rowSpacing = 90;
+  const colSpacing = 110;       // lateral gap between left/right columns
+  const rowSpacing = 110;       // back-to-back gap between rows
   for (let i = 0; i < count; i++) {
     const col = (i % 2 === 0) ? -1 : 1;
     const row = Math.floor(i / 2);
     const back = -rowSpacing * (row + 1);
-    const side = col * colSpacing * 0.6;
+    const side = col * colSpacing;
     const x = start.x + start.tx * back + start.nx * side;
     const y = start.y + start.ty * back + start.ny * side;
     const angle = Math.atan2(start.ty, start.tx);
