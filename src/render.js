@@ -499,26 +499,6 @@ export class RallyScene {
     rearBumper.position.set(-2.15, 0.55, 0);
     g.add(rearBumper);
 
-    // Wide front fender flares — emphasise the front end's mass.
-    const frontFenderMat = paint;
-    const frontFenderGeom = new THREE.CylinderGeometry(0.48, 0.48, 1.05, 12, 1, false, 0, Math.PI);
-    for (const fz of [-0.85, 0.85]) {
-      const ff = new THREE.Mesh(frontFenderGeom, frontFenderMat);
-      ff.rotation.x = Math.PI / 2;
-      ff.rotation.y = Math.PI;
-      ff.position.set(1.4, 0.55, fz);
-      g.add(ff);
-    }
-    // Narrower rear haunch.
-    const rearFenderGeom = new THREE.CylinderGeometry(0.42, 0.42, 0.85, 12, 1, false, 0, Math.PI);
-    for (const fz of [-0.82, 0.82]) {
-      const rf = new THREE.Mesh(rearFenderGeom, frontFenderMat);
-      rf.rotation.x = Math.PI / 2;
-      rf.rotation.y = Math.PI;
-      rf.position.set(-1.4, 0.5, fz);
-      g.add(rf);
-    }
-
     // Hood scoop (small detail on top of the hood).
     const scoop = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.12, 0.7), black);
     scoop.position.set(1.4, 1.01, 0);
