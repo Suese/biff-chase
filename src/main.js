@@ -274,11 +274,11 @@ function applyState(state) {
   // Rebuild the scene if the track changed. State sometimes carries only the
   // seed (bandwidth optimisation) — in that case the receiver should already
   // have the full track from an earlier snapshot.
-  if (state.track && state.track.centerline && _sceneReady && (!scene._currentTrack || scene._currentTrack.seed !== state.track.seed)) {
+  if (state.track && state.track.metaMap && _sceneReady && (!scene._currentTrack || scene._currentTrack.seed !== state.track.seed)) {
     scene.buildBackground(state.track.bounds);
     scene.buildTrack(state.track);
     scene.resetCamera();
-  } else if (state.track && !state.track.centerline && scene._currentTrack && scene._currentTrack.seed !== state.track.seed) {
+  } else if (state.track && !state.track.metaMap && scene._currentTrack && scene._currentTrack.seed !== state.track.seed) {
     // We have a new seed but no payload — client missed the bootstrap snapshot.
     // The next periodic snapshot from the host won't include it either, so
     // request a refresh by sending a no-op join.

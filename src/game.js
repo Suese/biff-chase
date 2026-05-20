@@ -9,7 +9,7 @@
 import Matter from 'matter-js';
 import {
   createWorld, createCarBody, refreshCarStats,
-  stepCar, clampToTrack, dealDamage, respawnCar, carSnapshot, applyCarSnapshot,
+  stepCar, dealDamage, respawnCar, carSnapshot, applyCarSnapshot,
   buildWallBodies,
   FIXED_DT, CAR_LENGTH, PICKUP_R, MINE_R, OIL_R,
 } from './physics.js';
@@ -448,39 +448,9 @@ export class GameRoom {
     // 2. Run Matter physics step
     Matter.Engine.update(this.engine, dt * 1000);
 
-    // 2.5. CSG track containment — push cars back into the road and emit
-    // grind/bump effects. Thresholds are all in m/s.
-    eachCar(this.ecs, (e) => {
-      const body = getRigidBody(e);
-      const hit = clampToTrack(body, this.track);
-      if (!hit) return;
-      const now = Date.now();
-      const lastGrind = body._lastGrindMs || 0;
-      if (hit.speedSec > 4 && now - lastGrind > 80) {
-        body._lastGrindMs = now;
-        this.emitEvent({
-          type: 'grind',
-          playerId: body.ownerId,
-          x: hit.contactX, y: hit.contactY,
-          intensity: Math.min(1, hit.speedSec / 22),
-        });
-      }
-      // Damage scales with speed; only fires on hard wall contacts.
-      if (hit.speedSec > 16 && hit.overhang > 0.3) {
-        const lastBump = body._lastBumpMs || 0;
-        if (now - lastBump > 250) {
-          body._lastBumpMs = now;
-          const dmg = Math.min(30, (hit.speedSec - 10) * 0.7);
-          dealDamage(body, dmg);
-          this.emitEvent({
-            type: 'bump',
-            playerId: body.ownerId,
-            x: hit.contactX, y: hit.contactY,
-            intensity: Math.min(1, hit.speedSec / 26),
-          });
-        }
-      }
-    });
+    // 2.5. Containment is handled by the WALL bodies (Matter collision).
+    // Cars are free to drive on any tile; per-surface friction in stepCar
+    // makes off-road sticky and slow without a hard clamp.
 
     // 3. Pickups
     const now = Date.now();
@@ -543,7 +513,9 @@ export class GameRoom {
       this.emitEvent({ type: 'hazard_expired', id });
     }
 
-    // 5. Lap detection
+    // 5. Lap detection — cell-based. A checkpoint is "hit" when the car
+    // enters its cell. Lap increments when the car hits checkpoint 0 after
+    // visiting all the others.
     eachCar(this.ecs, (e) => {
       const car = getRigidBody(e);
       const ls = getLapData(e);
@@ -552,9 +524,9 @@ export class GameRoom {
       if (ls.finishedAtMs) return;
       const cp = this.track.checkpoints[ls.nextCheckpoint];
       if (!cp) return;
-      const prev = car._prevPos || { x: car.position.x, y: car.position.y };
-      car._prevPos = { x: car.position.x, y: car.position.y };
-      if (segmentsIntersect(prev.x, prev.y, car.position.x, car.position.y, cp.ax, cp.ay, cp.bx, cp.by)) {
+      const carGx = this._worldToCellX(car.position.x);
+      const carGy = this._worldToCellY(car.position.y);
+      if (carGx === cp.gx && carGy === cp.gy) {
         ls.nextCheckpoint = (ls.nextCheckpoint + 1) % this.track.checkpoints.length;
         if (ls.nextCheckpoint === 1) {
           ls.lap += 1;
@@ -574,6 +546,20 @@ export class GameRoom {
         }
       }
     });
+  }
+
+  // Convert a world X/Y back to a grid cell index using the track's grid.
+  _worldToCellX(x) {
+    const t = this.track;
+    if (!t) return 0;
+    const half = (t.gridSize * t.cellSize) / 2;
+    return Math.floor((x + half) / t.cellSize);
+  }
+  _worldToCellY(y) {
+    const t = this.track;
+    if (!t) return 0;
+    const half = (t.gridSize * t.cellSize) / 2;
+    return Math.floor((y + half) / t.cellSize);
   }
 
   grantPickup(playerId, kind) {
@@ -612,16 +598,13 @@ export class GameRoom {
   }
 
   maybeRespawn(car) {
-    // Respawn at the start/finish line — beginning of the current lap.
     if (!this.track) return;
-    const start = this.track.checkpoints[0];
-    const next  = this.track.checkpoints[1];
-    if (!start || !next) return;
-    const ang = Math.atan2(next.cy - start.cy, next.cx - start.cx);
+    const s = this.track.start;
+    const ang = Math.atan2(s.ty, s.tx);
     scheduleAfter(2200, () => {
       if (!this.cars.has(car.ownerId)) return;
-      respawnCar(car, start.cx, start.cy, ang);
-      this.emitEvent({ type: 'respawn', playerId: car.ownerId, x: start.cx, y: start.cy });
+      respawnCar(car, s.x, s.y, ang);
+      this.emitEvent({ type: 'respawn', playerId: car.ownerId, x: s.x, y: s.y });
     });
   }
 
@@ -645,12 +628,17 @@ export class GameRoom {
       // it (first send after a new race, or a fresh joiner). For all other
       // snapshots we just send the seed so the client can confirm it's still
       // looking at the same track.
-      // The renderer reconstructs its own continuous road ring from
-      // centerline + widths, so we don't ship the physics-side tiles[].
+      // Tile-grid track. Renderer needs biomeCells + tilePlacements +
+      // wallSegments + metaMap to reconstruct the world; physics needs
+      // metaMap + wallSegments + checkpoints.
       track: this.track ? (includeTrack ? {
         seed: this.track.seed,
-        centerline: this.track.centerline,
-        widths: this.track.widths,
+        metaMap: this.track.metaMap,
+        biomeCells: this.track.biomeCells,
+        tilePlacements: this.track.tilePlacements,
+        wallSegments: this.track.wallSegments,
+        gridSize: this.track.gridSize,
+        cellSize: this.track.cellSize,
         start: this.track.start,
         checkpoints: this.track.checkpoints,
         pickupSlots: this.track.pickupSlots,
@@ -717,14 +705,3 @@ export class GameRoom {
   }
 }
 
-// ---- math helpers ----
-function segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
-  const d1x = bx - ax, d1y = by - ay;
-  const d2x = dx - cx, d2y = dy - cy;
-  const denom = d1x * d2y - d1y * d2x;
-  if (Math.abs(denom) < 1e-9) return false;
-  const sx = ax - cx, sy = ay - cy;
-  const t = (sx * d2y - sy * d2x) / denom;
-  const u = (sx * d1y - sy * d1x) / denom;
-  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
-}

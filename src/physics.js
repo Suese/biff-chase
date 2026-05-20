@@ -63,37 +63,6 @@ export function buildWallBodies(world, wallSegments) {
   return bodies;
 }
 
-export function buildTrackBodies(world, track) {
-  const bodies = [];
-  const wallThickness = 0.8;   // 0.8 m thick barrier
-  const addWallLoop = (loop) => {
-    for (let i = 0; i < loop.length; i++) {
-      const a = loop[i];
-      const b = loop[(i + 1) % loop.length];
-      const mx = (a.x + b.x) / 2;
-      const my = (a.y + b.y) / 2;
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const len = Math.hypot(dx, dy);
-      const angle = Math.atan2(dy, dx);
-      const seg = Matter.Bodies.rectangle(mx, my, len + 0.1, wallThickness, {
-        isStatic: true,
-        angle,
-        friction: 0,
-        frictionStatic: 0,
-        restitution: 0.05,
-        label: 'wall',
-        slop: 0.005,
-      });
-      bodies.push(seg);
-    }
-  };
-  addWallLoop(track.inner);
-  addWallLoop(track.outer);
-  Matter.Composite.add(world, bodies);
-  return bodies;
-}
-
 // ---------- Cars ----------
 
 export function createCarBody(x, y, angle, ownerId, stats) {

@@ -5,8 +5,13 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { PLAYER_COLORS } from './colors.js';
 import { ITEMS } from './items.js';
-import { CELL_SIZE } from './tiles.js';
+import { CELL_SIZE, MASK_N, MASK_E, MASK_S, MASK_W } from './tiles.js';
 import { WATER, LAND, FOREST, MOUNTAIN, ROAD } from './terrain.js';
+
+const MASK_N_BIT = MASK_N;
+const MASK_E_BIT = MASK_E;
+const MASK_S_BIT = MASK_S;
+const MASK_W_BIT = MASK_W;
 
 // ---- Materials shared across every cell of a given biome / road type.
 
@@ -388,7 +393,7 @@ export class RallyScene {
 
   // ---- Track build (continuous geometry — no per-tile seams)
   buildTrack(track) {
-    if (!track || !track.centerline || !track.widths) return;
+    if (!track || !track.metaMap) return;
     this._currentTrack = track;
 
     while (this.trackGroup.children.length) {
@@ -401,11 +406,11 @@ export class RallyScene {
     }
     this.skidMarks.length = 0;
 
-    // ---- Half-offset output tile system. Output tiles paint the whole
-    // world: ground, transitions, road, walls — all baked into the tile
-    // mesh chosen by the 4 corner biomes of the meta-grid. There is no
-    // separate per-meta-cell ground pass.
-    if (track.outputTiles?.length) {
+    // ---- 2D tile map drawn as 3D tiles. ONE mesh per meta-cell.
+    // Non-road cells get a biome tile (grass / forest / water / mountain).
+    // Road cells get a road tile chosen by 4-neighbour auto-tile, with
+    // walls baked in on every side that isn't another road cell.
+    if (track.biomeCells?.length || track.tilePlacements?.length) {
       this._buildTileMap(track);
       this._buildStartFinish(track);
       return;
@@ -497,12 +502,122 @@ export class RallyScene {
     }
   }
 
-  // True tile map. For each output tile (at the corner intersection of
-  // 4 meta-cells), render 4 quadrant meshes — one per surrounding meta-
-  // cell biome — plus any walls that come from road↔non-road quadrant
-  // pairs. Decorations (single tree, peak, water surface) live at the
-  // quadrant centre so each meta-cell shows ONE primary feature.
+  // 2D tile map → 3D tiles. ONE 3D mesh per meta-cell:
+  //   non-road biomes  → biome tile (grass / forest / water / mountain)
+  //   road cells       → road tile from autotile (straight / corner /
+  //                      tee / cross / cap) WITH walls baked in along any
+  //                      side whose neighbour isn't road
+  // Nothing else. No half-offsets, no transitions, no decoration scatter.
   _buildTileMap(track) {
+    const TILE = CELL_SIZE;
+    const HALF = TILE / 2;
+    const tileGround = new THREE.BoxGeometry(TILE, 0.3, TILE);
+    const tileWater  = new THREE.BoxGeometry(TILE * 1.001, 0.06, TILE * 1.001);
+    const tileRoad   = new THREE.BoxGeometry(TILE, 0.16, TILE);
+    const wallGeom   = new THREE.BoxGeometry(TILE, 0.7, 0.30);
+    const wallTopG   = new THREE.BoxGeometry(TILE, 0.10, 0.34);
+    const dashGeom   = new THREE.BoxGeometry(TILE * 0.55, 0.04, 0.16);
+    const treeTrunk  = new THREE.CylinderGeometry(0.18, 0.24, 1.3, 6);
+    const treeFol    = new THREE.ConeGeometry(1.3, 2.8, 7);
+    const peakGeom   = new THREE.ConeGeometry(1.6, 3.6, 6);
+
+    // 1) Non-road biome tiles — one mesh per cell.
+    for (const c of track.biomeCells || []) {
+      if (c.isRoad) continue;
+      let mat, geom, yPos;
+      if (c.biome === WATER)        { geom = tileWater;  yPos = -0.45; mat = WATER_GROUND_MAT; }
+      else if (c.biome === FOREST)  { geom = tileGround; yPos = -0.10; mat = FOREST_GROUND_MATS[cellHash(c.gx, c.gy, 2) % FOREST_GROUND_MATS.length]; }
+      else if (c.biome === MOUNTAIN){ geom = tileGround; yPos = -0.10; mat = MOUNTAIN_GROUND_MATS[cellHash(c.gx, c.gy, 3) % MOUNTAIN_GROUND_MATS.length]; }
+      else                          { geom = tileGround; yPos = -0.10; mat = GRASS_MATS[cellHash(c.gx, c.gy, 1) % GRASS_MATS.length]; }
+
+      const ground = new THREE.Mesh(geom, mat);
+      ground.position.set(c.cx, yPos, c.cy);
+      this.trackGroup.add(ground);
+
+      // ONE primary feature per cell at the cell centre.
+      if (c.biome === FOREST) {
+        const trunk = new THREE.Mesh(treeTrunk, TRUNK_MAT);
+        trunk.position.set(c.cx, 0.65, c.cy);
+        this.trackGroup.add(trunk);
+        const fol = new THREE.Mesh(treeFol, FOLIAGE_MAT);
+        fol.position.set(c.cx, 2.05, c.cy);
+        this.trackGroup.add(fol);
+      } else if (c.biome === MOUNTAIN) {
+        const peak = new THREE.Mesh(peakGeom, ROCK_MAT);
+        peak.position.set(c.cx, 1.6, c.cy);
+        this.trackGroup.add(peak);
+      } else if (c.biome === WATER) {
+        const surf = new THREE.Mesh(tileWater, WATER_SURF_MAT);
+        surf.position.set(c.cx, -0.10, c.cy);
+        this.trackGroup.add(surf);
+      }
+    }
+
+    // 2) Road tiles + their walls (one per meta-cell).
+    for (const p of track.tilePlacements || []) {
+      const roadMat = ROAD_MATS[p.roadType] || ROAD_MATS.pavement;
+      const plate = new THREE.Mesh(tileRoad, roadMat);
+      plate.position.set(p.cx, 0.05, p.cy);
+      this.trackGroup.add(plate);
+
+      // Centre marking: a single dash for straights, two for crosses,
+      // an arc-of-dashes for corners.
+      if (p.type === 'straight') {
+        const d = new THREE.Mesh(dashGeom, DASH_MAT);
+        d.position.set(p.cx, 0.15, p.cy);
+        d.rotation.y = p.rotation;
+        this.trackGroup.add(d);
+      } else if (p.type === 'corner') {
+        // 5 small dashes following the apex arc, oriented by p.rotation.
+        const r = TILE * 0.32;
+        for (let i = 0; i < 5; i++) {
+          const a = (i / 4) * (Math.PI / 2);
+          const lx = -HALF + r + Math.cos(a - Math.PI / 2) * r;
+          const lz = -HALF + r + Math.sin(a - Math.PI / 2) * r;
+          // Rotate (lx, lz) by p.rotation about cell centre.
+          const cs = Math.cos(p.rotation), sn = Math.sin(p.rotation);
+          const wx = cs * lx - sn * lz;
+          const wz = sn * lx + cs * lz;
+          const d = new THREE.Mesh(dashGeom, DASH_MAT);
+          d.position.set(p.cx + wx, 0.15, p.cy + wz);
+          d.rotation.y = a + p.rotation;
+          d.scale.x = 0.45;
+          this.trackGroup.add(d);
+        }
+      } else if (p.type === 'cross') {
+        const d1 = new THREE.Mesh(dashGeom, DASH_MAT);
+        d1.position.set(p.cx, 0.15, p.cy);
+        this.trackGroup.add(d1);
+        const d2 = new THREE.Mesh(dashGeom, DASH_MAT);
+        d2.position.set(p.cx, 0.15, p.cy);
+        d2.rotation.y = Math.PI / 2;
+        this.trackGroup.add(d2);
+      }
+
+      // Walls baked into the tile — one per side that ISN'T another road.
+      // Each side is a 4 m wall along the tile's outer edge.
+      const sides = [
+        { has: MASK_N_BIT, dx: 0,    dz: -HALF, rotY: 0,             nudge: 'z' },
+        { has: MASK_E_BIT, dx: HALF, dz: 0,    rotY: Math.PI / 2,    nudge: 'x' },
+        { has: MASK_S_BIT, dx: 0,    dz: HALF, rotY: 0,             nudge: 'z' },
+        { has: MASK_W_BIT, dx:-HALF, dz: 0,    rotY: Math.PI / 2,    nudge: 'x' },
+      ];
+      for (const s of sides) {
+        if ((p.mask & s.has) !== 0) continue;  // neighbour is road, no wall
+        const wall = new THREE.Mesh(wallGeom, ROAD_WALL_MAT);
+        wall.position.set(p.cx + s.dx, 0.5, p.cy + s.dz);
+        wall.rotation.y = s.rotY;
+        this.trackGroup.add(wall);
+        const top = new THREE.Mesh(wallTopG, ROAD_WALL_STRIPE_MAT);
+        top.position.set(p.cx + s.dx, 0.92, p.cy + s.dz);
+        top.rotation.y = s.rotY;
+        this.trackGroup.add(top);
+      }
+    }
+  }
+
+  // Legacy method retained but unused.
+  _legacyBuildTileMap(track) {
     const HALF_Q = CELL_SIZE / 4;            // distance from tile centre to quadrant centre
     const QUAD = CELL_SIZE / 2;              // quadrant edge length
     const quadGround  = new THREE.BoxGeometry(QUAD, 0.3, QUAD);
@@ -1333,32 +1448,42 @@ export class RallyScene {
     }
   }
 
-  // ---- Minimap
+  // ---- Minimap — paint the meta-grid by cell type.
   drawMinimap(state, myId) {
     const ctx = this.minimapCtx;
-    const ring = this._minimapRing;
-    if (!ctx || !this._currentTrack || !ring) return;
+    const t = this._currentTrack;
+    if (!ctx || !t || !t.metaMap) return;
     const W = this.minimapCanvas.width;
     const H = this.minimapCanvas.height;
     ctx.clearRect(0, 0, W, H);
-    const b = this._currentTrack.bounds;
+    const b = t.bounds;
     const bw = b.maxX - b.minX, bh = b.maxY - b.minY;
-    const pad = 10;
+    const pad = 8;
     const scale = Math.min((W - pad * 2) / bw, (H - pad * 2) / bh);
-    const dx = (W - bw * scale) / 2 - b.minX * scale;
-    const dy = (H - bh * scale) / 2 - b.minY * scale;
-    ctx.fillStyle = '#2a2f3a';
-    ctx.beginPath();
-    ctx.moveTo(dx + ring[0].left.x * scale, dy + ring[0].left.y * scale);
-    for (let i = 1; i < ring.length; i++) ctx.lineTo(dx + ring[i].left.x * scale, dy + ring[i].left.y * scale);
-    ctx.closePath();
-    for (let i = ring.length - 1; i >= 0; i--) ctx.lineTo(dx + ring[i].right.x * scale, dy + ring[i].right.y * scale);
-    ctx.fill('evenodd');
+    const ox = (W - bw * scale) / 2 - b.minX * scale;
+    const oy = (H - bh * scale) / 2 - b.minY * scale;
+    const cs = t.cellSize * scale;
+    // Each meta-cell is a tiny square; colour by biome.
+    for (let gy = 0; gy < t.gridSize; gy++) {
+      for (let gx = 0; gx < t.gridSize; gx++) {
+        const biome = t.metaMap[gy][gx];
+        if (biome === 'road')       ctx.fillStyle = '#2a2f3a';
+        else if (biome === 'water')  ctx.fillStyle = '#1a2c46';
+        else if (biome === 'forest') ctx.fillStyle = '#244c20';
+        else if (biome === 'mountain') ctx.fillStyle = '#6e6862';
+        else                          ctx.fillStyle = '#3e5e2c';
+        const px = ox + (gx * t.cellSize - b.minX - b.minX) * 0; // not used
+        // Simpler: position from the cell's world coords.
+        const wx = (gx - t.gridSize / 2) * t.cellSize;
+        const wy = (gy - t.gridSize / 2) * t.cellSize;
+        ctx.fillRect(ox + wx * scale, oy + wy * scale, cs, cs);
+      }
+    }
     for (const car of state.cars) {
       const colorIdx = state.players.findIndex(p => p.id === car.id);
       ctx.fillStyle = PLAYER_COLORS[(colorIdx < 0 ? 0 : colorIdx) % PLAYER_COLORS.length];
-      const cx = dx + car.x * scale;
-      const cy = dy + car.y * scale;
+      const cx = ox + car.x * scale;
+      const cy = oy + car.y * scale;
       ctx.beginPath();
       ctx.arc(cx, cy, car.id === myId ? 4 : 3, 0, Math.PI * 2);
       ctx.fill();
