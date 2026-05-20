@@ -274,11 +274,11 @@ function applyState(state) {
   // Rebuild the scene if the track changed. State sometimes carries only the
   // seed (bandwidth optimisation) — in that case the receiver should already
   // have the full track from an earlier snapshot.
-  if (state.track && state.track.bounds && _sceneReady && (!scene._currentTrack || scene._currentTrack.seed !== state.track.seed)) {
+  if (state.track && state.track.centerline && _sceneReady && (!scene._currentTrack || scene._currentTrack.seed !== state.track.seed)) {
     scene.buildBackground(state.track.bounds);
     scene.buildTrack(state.track);
-    scene.resetCamera();   // snap to the new race's spawn instead of panning from (0,0)
-  } else if (state.track && !state.track.bounds && scene._currentTrack && scene._currentTrack.seed !== state.track.seed) {
+    scene.resetCamera();
+  } else if (state.track && !state.track.centerline && scene._currentTrack && scene._currentTrack.seed !== state.track.seed) {
     // We have a new seed but no payload — client missed the bootstrap snapshot.
     // The next periodic snapshot from the host won't include it either, so
     // request a refresh by sending a no-op join.
@@ -466,7 +466,7 @@ onGameTick((dt) => {
   let cam = null;
   if (interpCars.has(myId)) cam = interpCars.get(myId);
   else if (interpCars.size > 0) cam = interpCars.values().next().value;
-  if (cam) scene.setCameraTarget(cam.x, cam.y);
+  if (cam) scene.setCameraTarget(cam.x, cam.y, cam.a);
   // Dynamic zoom: tight at standstill, pull back as the local car gains speed
   // so the player sees more of the road ahead.
   const myInterp = interpCars.get(myId);

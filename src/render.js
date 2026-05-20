@@ -1,8 +1,23 @@
-// Three.js renderer. Gameplay stays in 2D — game coordinates (x, y) map to
-// world (x, 0, y) so the entire scene lives on the XZ plane. An orthographic
-// camera positioned above the player looks straight down for a clean
-// top-down view; we still get specular highlights and shadowed depth from
-// box/cone geometry under directional lighting.
+// Three.js renderer with a proper 3D chase camera and a continuous track
+// mesh (no per-tile seams). Game logic stays 2D — coordinates (x, y) map
+// to world (x, 0, y); rotation around game's Z axis becomes rotation about
+// world Y.
+//
+// Design notes:
+//
+//  * Track surface and walls are built from a single "edge ring": for each
+//    centerline vertex we compute a miter-limited offset that flows
+//    smoothly into both neighbouring segments. That ring drives ONE
+//    BufferGeometry triangle strip for the road and two more for the
+//    left/right walls — no per-segment quads, no seams, no gaps.
+//
+//  * Camera is a PerspectiveCamera that chases the local player's car. It
+//    rotates lazily (low damping) so a sharp steer doesn't whip the world
+//    around, but you still get an over-the-shoulder feel as the car turns.
+//
+//  * Each visual element (road, walls, cars, pickups, hazards, particles)
+//    is a Three.js Object3D living in this.scene; per-frame we just update
+//    transforms and material colours.
 
 import * as THREE from 'three';
 import { PLAYER_COLORS } from './colors.js';
@@ -14,74 +29,135 @@ function lerpColor(a, b, t) {
   return ((ar + (br - ar) * t) | 0) << 16 | ((ag + (bg - ag) * t) | 0) << 8 | ((ab + (bb - ab) * t) | 0);
 }
 
+function shortestAngleDelta(a, b) {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+// Build a closed ring of {left, right} world-space points from a centerline
+// + widths array. Each vertex uses the BISECTOR of its incoming/outgoing
+// tangents, scaled by 1/cos(half-angle) to keep perpendicular distance from
+// the centerline constant on bends — with a miter limit so sharp corners
+// don't blow up to infinity. This is the standard polyline-offset construction.
+function buildEdgeRing(centerline, widths, miterLimit = 2.8) {
+  const N = centerline.length;
+  const ring = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const prev = centerline[(i - 1 + N) % N];
+    const cur  = centerline[i];
+    const next = centerline[(i + 1) % N];
+
+    let ix = cur.x - prev.x, iy = cur.y - prev.y;
+    const il = Math.hypot(ix, iy) || 1;
+    ix /= il; iy /= il;
+    let ox = next.x - cur.x, oy = next.y - cur.y;
+    const ol = Math.hypot(ox, oy) || 1;
+    ox /= ol; oy /= ol;
+
+    let bx = ix + ox, by = iy + oy;
+    let perpX, perpY;
+    const bl = Math.hypot(bx, by);
+    if (bl < 1e-3) {
+      // 180° reversal — bisector undefined; use incoming-tangent perpendicular.
+      perpX = -iy; perpY = ix;
+    } else {
+      bx /= bl; by /= bl;
+      perpX = -by; perpY = bx;
+    }
+    const inPerpX = -iy, inPerpY = ix;
+    const dot = Math.abs(perpX * inPerpX + perpY * inPerpY);
+    let scale = 1 / Math.max(0.001, dot);
+    if (scale > miterLimit) scale = miterLimit;
+    const halfW = widths[i] * 0.5 * scale;
+    ring[i] = {
+      left:  { x: cur.x + perpX * halfW, y: cur.y + perpY * halfW },
+      right: { x: cur.x - perpX * halfW, y: cur.y - perpY * halfW },
+    };
+  }
+  return ring;
+}
+
 export class RallyScene {
   constructor(rootEl) {
     this.rootEl = rootEl;
     this.renderer = null;
     this.scene = null;
     this.camera = null;
-    this.cameraPos = { x: 0, y: 0 };
+
+    // Camera follow state. Position lerps to the local player; angle lerps
+    // lazily so the world doesn't spin under the player's hand.
+    this.cameraPos = { x: 0, z: 0 };
+    this.cameraAngle = 0;
     this.cameraZoom = 1.0;
     this.targetZoom = 1.0;
-    this._cameraTarget = null;
+    this._cameraTarget = null;     // { x, y, angle }
     this._cameraSet = false;
 
     this.tickCbs = [];
     this.trackGroup = null;
-
     this.carMeshes = new Map();      // id -> Group
     this.carFlashUntil = new Map();
-    this.pickupMeshes = new Map();   // slotIndex -> Group
-    this.hazardMeshes = new Map();   // id -> Group
+    this.pickupMeshes = new Map();   // slotIndex -> Mesh
+    this.hazardMeshes = new Map();   // id -> Mesh
     this.particles = [];
 
     this.minimapCanvas = null;
     this.minimapCtx = null;
+    this._minimapRing = null;        // cached for fast redraw
 
     this._currentTrack = null;
   }
 
   async init() {
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(window.devicePixelRatio || 1);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setClearColor(0x0a0c10);
+    this.renderer.setClearColor(0x05070a);
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.rootEl.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(0x0a0c10, 1200, 2400);
+    // Subtle distance fog — sells depth + hides the world's edge.
+    this.scene.fog = new THREE.Fog(0x05070a, 900, 2400);
 
-    // Top-down orthographic camera. Frustum width driven by zoom.
-    this.camera = new THREE.OrthographicCamera(-100, 100, 100, -100, 1, 4000);
-    this.camera.position.set(0, 900, 0);
-    this.camera.up.set(0, 0, -1);
+    // PerspectiveCamera — chase cam. FOV tuned wide enough for arcade feel
+    // without too much fish-eye.
+    this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 1, 5000);
+    this.camera.position.set(0, 250, 250);
     this.camera.lookAt(0, 0, 0);
 
-    // Lighting — soft fill + directional sun for cabin/wheel highlights.
-    const ambient = new THREE.AmbientLight(0xffffff, 0.55);
-    this.scene.add(ambient);
-    const sun = new THREE.DirectionalLight(0xffffff, 0.85);
-    sun.position.set(600, 1000, 400);
+    // Lighting: directional sun + warm ambient + a subtle hemisphere fill
+    // so shadowed sides aren't pitch black.
+    const sun = new THREE.DirectionalLight(0xfff0d8, 1.05);
+    sun.position.set(400, 800, 200);
     this.scene.add(sun);
+    const hemi = new THREE.HemisphereLight(0xa0c0ff, 0x202028, 0.45);
+    this.scene.add(hemi);
+    const ambient = new THREE.AmbientLight(0xffffff, 0.18);
+    this.scene.add(ambient);
 
-    // Ground plane (large grey slab beneath the road).
+    // Ground — large dark plane below everything.
     this.ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(8000, 8000),
-      new THREE.MeshLambertMaterial({ color: 0x141821 }),
+      new THREE.PlaneGeometry(10000, 10000),
+      new THREE.MeshLambertMaterial({ color: 0x0c1018 }),
     );
     this.ground.rotation.x = -Math.PI / 2;
+    this.ground.position.y = -1;
     this.scene.add(this.ground);
 
-    // Track group — cleared and rebuilt each race.
+    // Group for everything the track owns (road, walls, curbs, start line,
+    // pickups, hazards). Rebuilt on track change.
     this.trackGroup = new THREE.Group();
     this.scene.add(this.trackGroup);
 
-    // 2D minimap canvas inside the existing #minimap div.
+    // 2D minimap overlay.
     const mm = document.getElementById('minimap');
     if (mm) {
       this.minimapCanvas = document.createElement('canvas');
-      this.minimapCanvas.width = 180;
-      this.minimapCanvas.height = 180;
+      this.minimapCanvas.width = 200;
+      this.minimapCanvas.height = 200;
       this.minimapCanvas.style.cssText = 'width:100%;height:100%;display:block;';
       mm.appendChild(this.minimapCanvas);
       this.minimapCtx = this.minimapCanvas.getContext('2d');
@@ -93,46 +169,59 @@ export class RallyScene {
 
   _resize() {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this._updateFrustum();
-  }
-
-  _updateFrustum() {
-    const aspect = window.innerWidth / window.innerHeight;
-    // Halfheight of the visible world at zoom=1 is 420 px. Bigger zoom = closer.
-    const halfH = 420 / this.cameraZoom;
-    const halfW = halfH * aspect;
-    this.camera.left = -halfW;
-    this.camera.right = halfW;
-    this.camera.top = halfH;
-    this.camera.bottom = -halfH;
+    this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
   }
 
   onTick(cb) { this.tickCbs.push(cb); }
-  setCameraTarget(x, y) { this._cameraTarget = { x, y }; }
+  // setCameraTarget(x, y) or (x, y, angle) — angle in game-radians, see main.js.
+  setCameraTarget(x, y, angle = null) { this._cameraTarget = { x, y, angle }; }
   setZoom(z) { this.targetZoom = z; }
   resetCamera() { this._cameraSet = false; }
 
-  // Driven by main.js's master rAF loop.
   _driveTick(dt) {
-    // Camera smoothing — snap on first frame after a target appears.
+    // ---- Camera follow + lazy yaw rotation
     if (this._cameraTarget) {
+      const tgt = this._cameraTarget;
       if (!this._cameraSet) {
-        this.cameraPos.x = this._cameraTarget.x;
-        this.cameraPos.y = this._cameraTarget.y;
+        this.cameraPos.x = tgt.x;
+        this.cameraPos.z = tgt.y;
+        if (tgt.angle != null) this.cameraAngle = tgt.angle;
         this._cameraSet = true;
       } else {
-        const k = 1 - Math.pow(0.001, dt);
-        this.cameraPos.x += (this._cameraTarget.x - this.cameraPos.x) * k;
-        this.cameraPos.y += (this._cameraTarget.y - this.cameraPos.y) * k;
+        const kPos = 1 - Math.pow(0.001, dt);
+        this.cameraPos.x += (tgt.x - this.cameraPos.x) * kPos;
+        this.cameraPos.z += (tgt.y - this.cameraPos.z) * kPos;
+        if (tgt.angle != null) {
+          const kAng = 1 - Math.pow(0.10, dt);   // slower than position
+          this.cameraAngle += shortestAngleDelta(this.cameraAngle, tgt.angle) * kAng;
+        }
       }
     }
     this.cameraZoom += (this.targetZoom - this.cameraZoom) * (1 - Math.pow(0.001, dt));
-    this._updateFrustum();
-    this.camera.position.set(this.cameraPos.x, 900, this.cameraPos.y);
-    this.camera.lookAt(this.cameraPos.x, 0, this.cameraPos.y);
 
-    // Particles
+    // Chase camera: position behind the car in the direction opposite to its
+    // forward heading. Game forward at angle 0 = +X axis; in world coords
+    // (x, 0, y), forward is (cos a, 0, sin a).
+    const ang = this.cameraAngle;
+    const fwdX = Math.cos(ang);
+    const fwdZ = Math.sin(ang);
+    // Pull-back distance + height scale with zoom: higher zoom = closer cam.
+    const dist   = 250 / this.cameraZoom;
+    const height = 180 / this.cameraZoom;
+    const lookAhead = 60;
+    this.camera.position.set(
+      this.cameraPos.x - fwdX * dist,
+      height,
+      this.cameraPos.z - fwdZ * dist,
+    );
+    this.camera.lookAt(
+      this.cameraPos.x + fwdX * lookAhead,
+      18,
+      this.cameraPos.z + fwdZ * lookAhead,
+    );
+
+    // ---- Particles
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
       p.life -= dt;
@@ -145,8 +234,9 @@ export class RallyScene {
       }
       p.mesh.position.x += p.vx * dt;
       p.mesh.position.z += p.vy * dt;
-      p.vx *= 0.92;
-      p.vy *= 0.92;
+      p.mesh.position.y += p.vyW * dt;
+      p.vx *= 0.92; p.vy *= 0.92;
+      p.vyW -= 380 * dt;       // gravity for sparks
       p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
     }
 
@@ -154,109 +244,175 @@ export class RallyScene {
     this.renderer.render(this.scene, this.camera);
   }
 
-  // ---- Background / ground
+  // ---- Track build
   buildBackground(bounds) {
     if (!this.ground) return;
-    const w = bounds.maxX - bounds.minX + 800;
-    const h = bounds.maxY - bounds.minY + 800;
+    const w = bounds.maxX - bounds.minX + 1200;
+    const h = bounds.maxY - bounds.minY + 1200;
     this.ground.geometry.dispose();
     this.ground.geometry = new THREE.PlaneGeometry(w, h);
     this.ground.position.x = (bounds.minX + bounds.maxX) / 2;
     this.ground.position.z = (bounds.minY + bounds.maxY) / 2;
   }
 
-  // ---- Track build (CSG union of trapezoid tiles)
+  // Receives a full track (with centerline + widths) and rebuilds the road,
+  // walls, curbs and start/finish. Renderer-side; ignores `track.tiles`
+  // which are only used by host physics.
   buildTrack(track) {
-    if (!track || !track.tiles) return;     // slim snapshot; nothing to build
+    if (!track || !track.centerline || !track.widths) return;
     this._currentTrack = track;
-    // Wipe previous race's meshes.
+
+    // Wipe previous race.
     while (this.trackGroup.children.length) {
       const obj = this.trackGroup.children.pop();
       this._disposeNode(obj);
     }
-
-    // Road surface: one merged BufferGeometry quad per tile.
-    const roadPos = [];
-    const roadIdx = [];
-    let v = 0;
-    for (const t of track.tiles) {
-      roadPos.push(t.al.x, 0.4, t.al.y);
-      roadPos.push(t.bl.x, 0.4, t.bl.y);
-      roadPos.push(t.br.x, 0.4, t.br.y);
-      roadPos.push(t.ar.x, 0.4, t.ar.y);
-      roadIdx.push(v, v + 1, v + 2, v, v + 2, v + 3);
-      v += 4;
-    }
-    const roadGeom = new THREE.BufferGeometry();
-    roadGeom.setAttribute('position', new THREE.Float32BufferAttribute(roadPos, 3));
-    roadGeom.setIndex(roadIdx);
-    roadGeom.computeVertexNormals();
-    const road = new THREE.Mesh(roadGeom, new THREE.MeshLambertMaterial({ color: 0x2a2f3a }));
-    this.trackGroup.add(road);
-
-    // Walls — one short box per tile-edge segment (left + right of each tile).
-    // They overlap at corners, which is fine since we only render them.
-    const wallMat = new THREE.MeshLambertMaterial({ color: 0x4a5161 });
-    const wallH = 22;
-    for (const t of track.tiles) {
-      this._wallSegment(t.al, t.bl, wallH, wallMat);
-      this._wallSegment(t.ar, t.br, wallH, wallMat);
-    }
-
-    // Curbs — thin coloured strips just inside each wall.
-    for (let i = 0; i < track.tiles.length; i++) {
-      const t = track.tiles[i];
-      const colorL = (i % 2 === 0) ? 0xff3a3a : 0xf3f3f3;
-      const colorR = (i % 2 === 0) ? 0xf3f3f3 : 0xff3a3a;
-      this._curbSegment(t.al, t.bl, colorL);
-      this._curbSegment(t.ar, t.br, colorR);
-    }
-
-    // Start/finish checkered band.
-    const s = track.start;
-    const stripeMatLight = new THREE.MeshLambertMaterial({ color: 0xffffff });
-    const stripeMatDark = new THREE.MeshLambertMaterial({ color: 0x111111 });
-    for (let k = -4; k <= 4; k++) {
-      const px = s.x + s.nx * (k * 22);
-      const pz = s.y + s.ny * (k * 22);
-      const stripe = new THREE.Mesh(
-        new THREE.BoxGeometry(18, 0.6, 22),
-        (k % 2 === 0) ? stripeMatLight : stripeMatDark,
-      );
-      stripe.position.set(px, 0.9, pz);
-      stripe.rotation.y = -Math.atan2(s.ty, s.tx);
-      this.trackGroup.add(stripe);
-    }
-
-    // Pickup meshes recreated lazily in syncPickups.
+    // Clear pickup meshes too (different track → fresh pickups).
     for (const mesh of this.pickupMeshes.values()) {
       this.scene.remove(mesh);
       this._disposeNode(mesh);
     }
     this.pickupMeshes.clear();
-  }
 
-  _wallSegment(a, b, height, mat) {
-    const dx = b.x - a.x, dz = b.y - a.y;
-    const len = Math.hypot(dx, dz);
-    if (len < 0.5) return;
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(len, height, 6), mat);
-    mesh.position.set((a.x + b.x) / 2, height / 2, (a.y + b.y) / 2);
-    mesh.rotation.y = -Math.atan2(dz, dx);
-    this.trackGroup.add(mesh);
-  }
+    const ring = buildEdgeRing(track.centerline, track.widths);
+    this._minimapRing = ring;
 
-  _curbSegment(a, b, color) {
-    const dx = b.x - a.x, dz = b.y - a.y;
-    const len = Math.hypot(dx, dz);
-    if (len < 0.5) return;
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(len, 0.8, 3),
-      new THREE.MeshLambertMaterial({ color }),
+    // ---- Road surface — single closed triangle strip from the ring.
+    const N = ring.length;
+    const roadPos = new Float32Array(N * 2 * 3);
+    for (let i = 0; i < N; i++) {
+      roadPos[i * 6 + 0] = ring[i].left.x;
+      roadPos[i * 6 + 1] = 0.5;
+      roadPos[i * 6 + 2] = ring[i].left.y;
+      roadPos[i * 6 + 3] = ring[i].right.x;
+      roadPos[i * 6 + 4] = 0.5;
+      roadPos[i * 6 + 5] = ring[i].right.y;
+    }
+    const roadIdx = [];
+    for (let i = 0; i < N; i++) {
+      const j = (i + 1) % N;
+      const a = i * 2, b = i * 2 + 1, c = j * 2, d = j * 2 + 1;
+      roadIdx.push(a, c, d, a, d, b);
+    }
+    const roadGeom = new THREE.BufferGeometry();
+    roadGeom.setAttribute('position', new THREE.BufferAttribute(roadPos, 3));
+    roadGeom.setIndex(roadIdx);
+    roadGeom.computeVertexNormals();
+    const road = new THREE.Mesh(
+      roadGeom,
+      new THREE.MeshLambertMaterial({ color: 0x2a2f3a }),
     );
-    mesh.position.set((a.x + b.x) / 2, 0.8, (a.y + b.y) / 2);
-    mesh.rotation.y = -Math.atan2(dz, dx);
-    this.trackGroup.add(mesh);
+    this.trackGroup.add(road);
+
+    // ---- Continuous wall ribbons, left and right. Each ribbon is a vertical
+    // strip following the ring with bottom on the road surface and top at
+    // wall height. No gaps regardless of corner angle.
+    const wallHeight = 28;
+    this.trackGroup.add(this._buildWallRibbon(ring, 'left', wallHeight, 0x4a5161));
+    this.trackGroup.add(this._buildWallRibbon(ring, 'right', wallHeight, 0x4a5161));
+
+    // ---- Curbs — thin red/white strip just inside each wall on the ground.
+    this.trackGroup.add(this._buildCurbRibbon(ring, 'left'));
+    this.trackGroup.add(this._buildCurbRibbon(ring, 'right'));
+
+    // ---- Centerline dashes — sparse white markings down the middle.
+    const dashes = new THREE.Group();
+    const dashMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    for (let i = 0; i < N; i += 4) {
+      const a = track.centerline[i];
+      const b = track.centerline[(i + 1) % N];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 0.5) continue;
+      const dash = new THREE.Mesh(
+        new THREE.BoxGeometry(Math.min(len * 0.55, 30), 0.4, 2.5),
+        dashMat,
+      );
+      dash.position.set((a.x + b.x) / 2, 0.9, (a.y + b.y) / 2);
+      dash.rotation.y = -Math.atan2(dy, dx);
+      dashes.add(dash);
+    }
+    this.trackGroup.add(dashes);
+
+    // ---- Start / finish checkered band.
+    const s = track.start;
+    const matLight = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    const matDark  = new THREE.MeshLambertMaterial({ color: 0x111111 });
+    for (let k = -5; k <= 5; k++) {
+      const px = s.x + s.nx * (k * 22);
+      const pz = s.y + s.ny * (k * 22);
+      const stripe = new THREE.Mesh(
+        new THREE.BoxGeometry(18, 0.8, 22),
+        (k % 2 === 0) ? matLight : matDark,
+      );
+      stripe.position.set(px, 1.0, pz);
+      stripe.rotation.y = -Math.atan2(s.ty, s.tx);
+      this.trackGroup.add(stripe);
+    }
+  }
+
+  _buildWallRibbon(ring, side, height, color) {
+    const N = ring.length;
+    const positions = new Float32Array(N * 2 * 3);
+    for (let i = 0; i < N; i++) {
+      const p = ring[i][side];
+      positions[i * 6 + 0] = p.x;
+      positions[i * 6 + 1] = 0;
+      positions[i * 6 + 2] = p.y;
+      positions[i * 6 + 3] = p.x;
+      positions[i * 6 + 4] = height;
+      positions[i * 6 + 5] = p.y;
+    }
+    const indices = [];
+    for (let i = 0; i < N; i++) {
+      const j = (i + 1) % N;
+      const a = i * 2, b = i * 2 + 1, c = j * 2, d = j * 2 + 1;
+      // Wind so the outward-facing normal points OUT of the road. For left
+      // ribbon, outward is toward +perp; for right, the reverse.
+      if (side === 'left') indices.push(a, b, d, a, d, c);
+      else                 indices.push(a, c, d, a, d, b);
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setIndex(indices);
+    geom.computeVertexNormals();
+    return new THREE.Mesh(geom, new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide }));
+  }
+
+  _buildCurbRibbon(ring, side) {
+    const N = ring.length;
+    // Build a thin strip just inside each wall edge — alternating red/white.
+    const positions = [];
+    const indices = [];
+    const colors = [];
+    const inset = 6;        // distance inside the wall, toward centerline
+    for (let i = 0; i < N; i++) {
+      const p = ring[i][side];
+      const other = ring[i][side === 'left' ? 'right' : 'left'];
+      const dx = other.x - p.x, dy = other.y - p.y;
+      const dl = Math.hypot(dx, dy) || 1;
+      const inX = dx / dl, inY = dy / dl;
+      // Inner edge (toward road)
+      positions.push(p.x + inX * inset, 1.1, p.y + inY * inset);
+      // Outer edge (on the wall side)
+      positions.push(p.x, 1.1, p.y);
+      const col = ((i % 2 === 0) ? 0xff3a3a : 0xf3f3f3);
+      const r = ((col >> 16) & 0xff) / 255;
+      const g = ((col >> 8)  & 0xff) / 255;
+      const b = ( col        & 0xff) / 255;
+      colors.push(r, g, b, r, g, b);
+    }
+    for (let i = 0; i < N; i++) {
+      const j = (i + 1) % N;
+      const a = i * 2, b = i * 2 + 1, c = j * 2, d = j * 2 + 1;
+      indices.push(a, c, d, a, d, b);
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geom.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
+    geom.setIndex(indices);
+    geom.computeVertexNormals();
+    return new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ vertexColors: true }));
   }
 
   // ---- Cars
@@ -266,40 +422,69 @@ export class RallyScene {
     g = new THREE.Group();
     const colorHex = parseInt(PLAYER_COLORS[colorIdx % PLAYER_COLORS.length].replace('#', ''), 16);
 
-    // Body — long axis along world X (= game-forward at angle 0).
+    // Chassis — long axis along world X (= game-forward at angle 0).
     const bodyMat = new THREE.MeshLambertMaterial({ color: colorHex });
     const body = new THREE.Mesh(new THREE.BoxGeometry(56, 12, 32), bodyMat);
-    body.position.y = 7;
+    body.position.y = 8;
     g.add(body);
     g.bodyMat = bodyMat;
     g.bodyColor = colorHex;
 
-    // Cabin — smaller box slightly behind centre, slightly above body.
-    const cabin = new THREE.Mesh(
-      new THREE.BoxGeometry(26, 9, 26),
-      new THREE.MeshLambertMaterial({ color: 0x101418 }),
-    );
-    cabin.position.set(-4, 16, 0);
+    // Cabin
+    const cabinMat = new THREE.MeshLambertMaterial({ color: 0x14181f });
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(28, 10, 24), cabinMat);
+    cabin.position.set(-4, 18, 0);
     g.add(cabin);
 
-    // Spoiler at the back.
+    // Hood scoop
+    const scoop = new THREE.Mesh(
+      new THREE.BoxGeometry(8, 4, 16),
+      new THREE.MeshLambertMaterial({ color: 0x101418 }),
+    );
+    scoop.position.set(12, 16, 0);
+    g.add(scoop);
+
+    // Rear spoiler (small angled wing)
     const spoiler = new THREE.Mesh(
       new THREE.BoxGeometry(4, 4, 24),
       new THREE.MeshLambertMaterial({ color: 0x0a0c10 }),
     );
-    spoiler.position.set(-26, 13, 0);
+    spoiler.position.set(-26, 14, 0);
     g.add(spoiler);
+    const spoilerLeg1 = new THREE.Mesh(
+      new THREE.BoxGeometry(2, 6, 2),
+      new THREE.MeshLambertMaterial({ color: 0x0a0c10 }),
+    );
+    spoilerLeg1.position.set(-26, 11, -10);
+    g.add(spoilerLeg1);
+    const spoilerLeg2 = spoilerLeg1.clone();
+    spoilerLeg2.position.z = 10;
+    g.add(spoilerLeg2);
 
-    // Wheels.
+    // Wheels — cylinders laid on their side.
     const wheelMat = new THREE.MeshLambertMaterial({ color: 0x000000 });
-    const wheelGeom = new THREE.CylinderGeometry(5, 5, 4, 12);
+    const wheelGeom = new THREE.CylinderGeometry(5.5, 5.5, 5, 12);
     const wheels = [[-18, -16], [-18, 16], [18, -16], [18, 16]];
     for (const [wx, wz] of wheels) {
       const w = new THREE.Mesh(wheelGeom, wheelMat);
-      // Cylinders are Y-axis by default; rotate to lay them on their side.
       w.rotation.x = Math.PI / 2;
-      w.position.set(wx, 3, wz);
+      w.position.set(wx, 3.5, wz);
       g.add(w);
+    }
+
+    // Headlight glints — small bright cubes on the front of the chassis.
+    const headlightMat = new THREE.MeshBasicMaterial({ color: 0xfff0a0 });
+    for (const wz of [-10, 10]) {
+      const hl = new THREE.Mesh(new THREE.BoxGeometry(2, 3, 4), headlightMat);
+      hl.position.set(27, 8, wz);
+      g.add(hl);
+    }
+    // Tail lights
+    const tailMat = new THREE.MeshBasicMaterial({ color: 0xff2030 });
+    for (const wz of [-12, 12]) {
+      const tl = new THREE.Mesh(new THREE.BoxGeometry(2, 3, 4), tailMat);
+      tl.position.set(-27, 8, wz);
+      g.add(tl);
     }
 
     this.scene.add(g);
@@ -320,26 +505,27 @@ export class RallyScene {
       const g = this.ensureCarMesh(car.id, colorIdx < 0 ? 0 : colorIdx);
       g.position.x = car.x;
       g.position.z = car.y;
-      // Game angle 0 = facing +X. Y-rotation in three.js with this look
-      // direction: world +X stays world +X at rotation.y = 0. For game angle
-      // +π/2 (= facing +Y), rotate around Y by -π/2.
+      // Game angle 0 = facing +X in world. Three.js rotation.y rotates about
+      // world Y. For game angle θ, rotate world-X by -θ (right-hand rule).
       g.rotation.y = -car.a;
 
-      // Damage flash → tint body toward red.
+      // Damage flash
       const flashUntil = this.carFlashUntil.get(car.id) || 0;
       if (flashUntil > now) {
         const pct = (flashUntil - now) / 200;
         g.bodyMat.color.setHex(lerpColor(g.bodyColor, 0xff3a48, pct));
+      } else if (!car.alive) {
+        g.bodyMat.color.setHex(0x444444);
       } else {
-        g.bodyMat.color.setHex(car.alive ? g.bodyColor : 0x555555);
+        g.bodyMat.color.setHex(g.bodyColor);
       }
 
       // Boost trail
-      if (car.boost > 0 && Math.random() < 0.6) {
+      if (car.boost > 0 && Math.random() < 0.7) {
         const ang = car.a;
         this.emitParticle(
           car.x - Math.cos(ang) * 28, car.y - Math.sin(ang) * 28,
-          -car.vx * 0.15, -car.vy * 0.15, 0.4, 0xff6a3d,
+          -car.vx * 0.18, -car.vy * 0.18, 0.45, 0xff8040,
         );
       }
     }
@@ -356,24 +542,20 @@ export class RallyScene {
   syncPickups(pickups, t) {
     for (const p of pickups) {
       let mesh = this.pickupMeshes.get(p.slotIndex);
-      if (!mesh) {
+      if (!mesh || mesh._kind !== p.kind) {
+        if (mesh) {
+          this.scene.remove(mesh);
+          this._disposeNode(mesh);
+        }
         mesh = this._buildPickupMesh(p.kind);
-        mesh.position.set(p.x, 14, p.y);
-        this.scene.add(mesh);
-        this.pickupMeshes.set(p.slotIndex, mesh);
-      } else if (mesh._kind !== p.kind) {
-        // Pickup respawned with a different kind — rebuild.
-        this.scene.remove(mesh);
-        this._disposeNode(mesh);
-        mesh = this._buildPickupMesh(p.kind);
-        mesh.position.set(p.x, 14, p.y);
+        mesh.position.set(p.x, 18, p.y);
         this.scene.add(mesh);
         this.pickupMeshes.set(p.slotIndex, mesh);
       }
       mesh.visible = !p.taken;
       if (!p.taken) {
-        mesh.rotation.y = t * 2;
-        mesh.position.y = 14 + Math.sin(t * 3) * 2.5;
+        mesh.rotation.y = t * 2.4;
+        mesh.position.y = 18 + Math.sin(t * 3 + p.slotIndex) * 3;
       }
     }
   }
@@ -390,14 +572,17 @@ export class RallyScene {
     let geom;
     switch (kind) {
       case 'scrap':  geom = new THREE.BoxGeometry(14, 14, 14); break;
-      case 'nitro':  geom = new THREE.ConeGeometry(9, 18, 6); break;
-      case 'mine':   geom = new THREE.SphereGeometry(9, 12, 8); break;
-      case 'oil':    geom = new THREE.CylinderGeometry(10, 10, 4, 12); break;
-      case 'repair': geom = new THREE.OctahedronGeometry(10); break;
-      case 'spikes': geom = new THREE.TetrahedronGeometry(11); break;
+      case 'nitro':  geom = new THREE.ConeGeometry(9, 20, 6); break;
+      case 'mine':   geom = new THREE.IcosahedronGeometry(11, 0); break;
+      case 'oil':    geom = new THREE.CylinderGeometry(10, 10, 5, 12); break;
+      case 'repair': geom = new THREE.OctahedronGeometry(11); break;
+      case 'spikes': geom = new THREE.TetrahedronGeometry(12); break;
       default:       geom = new THREE.OctahedronGeometry(10);
     }
-    const mesh = new THREE.Mesh(geom, new THREE.MeshLambertMaterial({ color }));
+    const mesh = new THREE.Mesh(
+      geom,
+      new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.25 }),
+    );
     mesh._kind = kind;
     return mesh;
   }
@@ -410,14 +595,13 @@ export class RallyScene {
       let mesh = this.hazardMeshes.get(h.id);
       if (!mesh) {
         mesh = this._buildHazardMesh(h.kind);
-        mesh.position.set(h.x, 0.6, h.y);
+        mesh.position.set(h.x, 1, h.y);
         this.scene.add(mesh);
         this.hazardMeshes.set(h.id, mesh);
       }
-      // Mines pulse.
-      if (h.kind === 'mine' && mesh.children[1]) {
+      if (h.kind === 'mine' && mesh.userData.led) {
         const pulse = (Math.sin(t * 8) + 1) * 0.5;
-        mesh.children[1].scale.setScalar(0.8 + pulse * 0.5);
+        mesh.userData.led.scale.setScalar(0.8 + pulse * 0.5);
       }
     }
     for (const [id, mesh] of this.hazardMeshes) {
@@ -432,28 +616,29 @@ export class RallyScene {
   _buildHazardMesh(kind) {
     const group = new THREE.Group();
     if (kind === 'mine') {
-      const body = new THREE.Mesh(
-        new THREE.CylinderGeometry(10, 10, 4, 12),
-        new THREE.MeshLambertMaterial({ color: 0x222 }),
-      );
-      group.add(body);
+      group.add(new THREE.Mesh(
+        new THREE.CylinderGeometry(10, 12, 6, 16),
+        new THREE.MeshLambertMaterial({ color: 0x1a1a1a }),
+      ));
       const led = new THREE.Mesh(
-        new THREE.SphereGeometry(3, 12, 8),
+        new THREE.SphereGeometry(2.5, 12, 8),
         new THREE.MeshBasicMaterial({ color: 0xff3030 }),
       );
-      led.position.y = 4;
+      led.position.y = 4.5;
       group.add(led);
+      group.userData.led = led;
     } else if (kind === 'oil') {
       const disc = new THREE.Mesh(
         new THREE.CircleGeometry(38, 24),
-        new THREE.MeshBasicMaterial({ color: 0x101010, transparent: true, opacity: 0.72 }),
+        new THREE.MeshBasicMaterial({ color: 0x101010, transparent: true, opacity: 0.78 }),
       );
       disc.rotation.x = -Math.PI / 2;
+      disc.position.y = 0.2;
       group.add(disc);
     } else if (kind === 'spikes') {
       for (let i = -2; i <= 2; i++) {
         const spike = new THREE.Mesh(
-          new THREE.ConeGeometry(3, 9, 4),
+          new THREE.ConeGeometry(3, 9, 5),
           new THREE.MeshLambertMaterial({ color: 0xaab0bd }),
         );
         spike.position.set(i * 6, 4.5, 0);
@@ -466,12 +651,13 @@ export class RallyScene {
   // ---- Particles
   emitParticle(x, y, vx, vy, life, color) {
     const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(3.5, 3.5, 3.5),
+      new THREE.BoxGeometry(3, 3, 3),
       new THREE.MeshBasicMaterial({ color, transparent: true }),
     );
     mesh.position.set(x, 10, y);
     this.scene.add(mesh);
-    this.particles.push({ mesh, vx, vy, life, maxLife: life });
+    // Slight upward initial velocity sells the burst feel.
+    this.particles.push({ mesh, vx, vy, vyW: 80 + Math.random() * 60, life, maxLife: life });
   }
 
   emitBurst(x, y, count, color = 0xff8040, speed = 240, life = 0.5) {
@@ -482,29 +668,33 @@ export class RallyScene {
     }
   }
 
-  // ---- Minimap — 2D canvas inside #minimap div.
+  // ---- Minimap (2D canvas overlay)
   drawMinimap(state, myId) {
     const ctx = this.minimapCtx;
-    if (!ctx || !this._currentTrack || !this._currentTrack.tiles) return;
+    const ring = this._minimapRing;
+    if (!ctx || !this._currentTrack || !ring) return;
     const W = this.minimapCanvas.width;
     const H = this.minimapCanvas.height;
     ctx.clearRect(0, 0, W, H);
     const b = this._currentTrack.bounds;
     const bw = b.maxX - b.minX, bh = b.maxY - b.minY;
-    const pad = 8;
+    const pad = 10;
     const scale = Math.min((W - pad * 2) / bw, (H - pad * 2) / bh);
     const dx = (W - bw * scale) / 2 - b.minX * scale;
     const dy = (H - bh * scale) / 2 - b.minY * scale;
+    // Filled road from the ring.
     ctx.fillStyle = '#2a2f3a';
-    for (const t of this._currentTrack.tiles) {
-      ctx.beginPath();
-      ctx.moveTo(dx + t.al.x * scale, dy + t.al.y * scale);
-      ctx.lineTo(dx + t.bl.x * scale, dy + t.bl.y * scale);
-      ctx.lineTo(dx + t.br.x * scale, dy + t.br.y * scale);
-      ctx.lineTo(dx + t.ar.x * scale, dy + t.ar.y * scale);
-      ctx.closePath();
-      ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(dx + ring[0].left.x * scale, dy + ring[0].left.y * scale);
+    for (let i = 1; i < ring.length; i++) {
+      ctx.lineTo(dx + ring[i].left.x * scale, dy + ring[i].left.y * scale);
     }
+    ctx.closePath();
+    for (let i = ring.length - 1; i >= 0; i--) {
+      ctx.lineTo(dx + ring[i].right.x * scale, dy + ring[i].right.y * scale);
+    }
+    ctx.fill('evenodd');
+    // Cars.
     for (const car of state.cars) {
       const colorIdx = state.players.findIndex(p => p.id === car.id);
       ctx.fillStyle = PLAYER_COLORS[(colorIdx < 0 ? 0 : colorIdx) % PLAYER_COLORS.length];
@@ -516,7 +706,6 @@ export class RallyScene {
     }
   }
 
-  // ---- Utility
   _disposeNode(node) {
     node.traverse?.((o) => {
       if (o.geometry) o.geometry.dispose();

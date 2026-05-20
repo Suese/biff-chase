@@ -612,13 +612,12 @@ export class GameRoom {
       // it (first send after a new race, or a fresh joiner). For all other
       // snapshots we just send the seed so the client can confirm it's still
       // looking at the same track.
+      // The renderer reconstructs its own continuous road ring from
+      // centerline + widths, so we don't ship the physics-side tiles[].
       track: this.track ? (includeTrack ? {
         seed: this.track.seed,
         centerline: this.track.centerline,
         widths: this.track.widths,
-        tiles: this.track.tiles,
-        inner: this.track.inner,
-        outer: this.track.outer,
         start: this.track.start,
         checkpoints: this.track.checkpoints,
         pickupSlots: this.track.pickupSlots,
