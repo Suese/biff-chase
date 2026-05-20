@@ -30,15 +30,27 @@ export function generateTrack(seed) {
   // Resample to roughly even arc length so wall offsets are clean.
   pts = resampleByArc(pts, 50);
 
-  // Per-vertex track width with smooth variation.
-  const widthBase = 180;
-  const widthVar  = 70;
+  // Per-vertex track width with smooth variation. Base is wide enough that a
+  // 4-wide starting grid (≈ 180 px including car widths + gaps) fits in any
+  // section with margin to spare. Variation adds character to the track shape.
+  const widthBase = 320;
+  const widthVar  = 60;
   const phase     = rng() * Math.PI * 2;
   const widthFreq = 3 + Math.floor(rng() * 3);
   const widths = pts.map((_, i) => {
     const t = (i / pts.length) * Math.PI * 2;
     return widthBase + Math.sin(t * widthFreq + phase) * widthVar;
   });
+  // Force generous width near the start/finish so the grid is always inside
+  // the track regardless of where the noise dipped. Indices 0 and the last
+  // few cover the start point + the backward grid rows.
+  const startMin = 280;
+  const startRange = 6;       // ~300 px back along the centerline
+  for (let i = 0; i < startRange; i++) {
+    const idxBack = (pts.length - i) % pts.length;
+    widths[i] = Math.max(widths[i], startMin);
+    widths[idxBack] = Math.max(widths[idxBack], startMin);
+  }
 
   const inner = [];
   const outer = [];
@@ -166,18 +178,22 @@ function normalize(v) {
   return { x: v.x / l, y: v.y / l };
 }
 
-// Helper: place N cars on the grid behind the start line, staggered F1-style.
-// Lateral spread is wide enough that two cars never visually merge.
+// Grid 4-wide × N-deep, all behind the start line. Lateral span is 180 px
+// (4 columns at 60 px spacing), which fits inside the guaranteed start-area
+// width of 280. Forward direction is the start tangent so cars face the
+// finish line.
 export function gridSpawnPositions(track, count) {
   const { start } = track;
   const slots = [];
-  const colSpacing = 110;       // lateral gap between left/right columns
-  const rowSpacing = 110;       // back-to-back gap between rows
+  const COLS = 4;
+  const colSpacing = 60;
+  const rowSpacing = 75;
+  const colOffset = -(COLS - 1) / 2;   // centre the grid: -1.5, -0.5, +0.5, +1.5
   for (let i = 0; i < count; i++) {
-    const col = (i % 2 === 0) ? -1 : 1;
-    const row = Math.floor(i / 2);
-    const back = -rowSpacing * (row + 1);
-    const side = col * colSpacing;
+    const colIdx = i % COLS;
+    const rowIdx = Math.floor(i / COLS);
+    const back = -rowSpacing * (rowIdx + 1);
+    const side = (colOffset + colIdx) * colSpacing;
     const x = start.x + start.tx * back + start.nx * side;
     const y = start.y + start.ty * back + start.ny * side;
     const angle = Math.atan2(start.ty, start.tx);

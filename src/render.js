@@ -329,14 +329,6 @@ export class RallyScene {
         this.emitParticle(car.x - Math.cos(car.a) * 28, car.y - Math.sin(car.a) * 28, -car.vx * 0.2, -car.vy * 0.2, 0.4, 0xff6a3d);
       }
     }
-    // Diagnostic — once per second, console-log what we're rendering. Catches
-    // "state has N cars but only M draw" bugs.
-    if (!this._lastCarLogMs || performance.now() - this._lastCarLogMs > 1000) {
-      this._lastCarLogMs = performance.now();
-      console.log('[render] cars', state.cars.map(c => ({
-        id: (c.id || '').slice(0, 6), x: Math.round(c.x), y: Math.round(c.y), alive: c.alive,
-      })));
-    }
     for (const [id, g] of this.carGfx) {
       if (!presentIds.has(id)) {
         this.carLayer.removeChild(g);
