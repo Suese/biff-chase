@@ -45,24 +45,31 @@ export function buildOutputTiles(metaMap) {
       const cx = cgx * CELL_SIZE - halfW;
       const cy = cgy * CELL_SIZE - halfW;
       // Walls — one per pair of adjacent quadrants with mixed road/non-road.
+      // axis = 'x' means the wall RUNS along the world X axis (horizontal
+      // segment in the XZ plane). axis = 'y' means it runs along world Y
+      // (which is world Z in 3D after the 2D→3D mapping).
       const walls = [];
       const halfQ = CELL_SIZE / 4;     // distance from tile centre to quadrant boundary
       const isRoad = (b) => b === ROAD;
-      // NW-NE pair: vertical boundary on the top half (z = -halfQ).
+      // NW-NE shared edge is the VERTICAL segment at x = cx in the top
+      // half of the tile — runs along world Y.
       if (isRoad(nw) !== isRoad(ne)) {
-        walls.push({ x: cx, y: cy - halfQ, len: CELL_SIZE / 2, axis: 'x' });
+        walls.push({ x: cx, y: cy - halfQ, len: CELL_SIZE / 2, axis: 'y' });
       }
-      // NE-SE pair: horizontal boundary on the right half (x = +halfQ).
+      // NE-SE shared edge is the HORIZONTAL segment at y = cy in the right
+      // half of the tile — runs along world X.
       if (isRoad(ne) !== isRoad(se)) {
-        walls.push({ x: cx + halfQ, y: cy, len: CELL_SIZE / 2, axis: 'y' });
+        walls.push({ x: cx + halfQ, y: cy, len: CELL_SIZE / 2, axis: 'x' });
       }
-      // SE-SW pair: vertical boundary on the bottom half (z = +halfQ).
+      // SE-SW shared edge is the VERTICAL segment at x = cx in the bottom
+      // half of the tile — runs along world Y.
       if (isRoad(se) !== isRoad(sw)) {
-        walls.push({ x: cx, y: cy + halfQ, len: CELL_SIZE / 2, axis: 'x' });
+        walls.push({ x: cx, y: cy + halfQ, len: CELL_SIZE / 2, axis: 'y' });
       }
-      // SW-NW pair: horizontal boundary on the left half (x = -halfQ).
+      // SW-NW shared edge is the HORIZONTAL segment at y = cy in the left
+      // half of the tile — runs along world X.
       if (isRoad(sw) !== isRoad(nw)) {
-        walls.push({ x: cx - halfQ, y: cy, len: CELL_SIZE / 2, axis: 'y' });
+        walls.push({ x: cx - halfQ, y: cy, len: CELL_SIZE / 2, axis: 'x' });
       }
       tiles.push({
         cgx, cgy,

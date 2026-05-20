@@ -246,13 +246,14 @@ export class RallyScene {
     const ambient = new THREE.AmbientLight(0xffffff, 0.15);
     this.scene.add(ambient);
 
-    // Ground — dark slab beneath the road.
+    // Ground — dark slab WELL BELOW the tile surface so it doesn't cover
+    // anything. Acts as an out-of-world backdrop.
     this.ground = new THREE.Mesh(
       new THREE.PlaneGeometry(800, 800),
       new THREE.MeshStandardMaterial({ color: 0x0f131c, roughness: 0.95, metalness: 0.0 }),
     );
     this.ground.rotation.x = -Math.PI / 2;
-    this.ground.position.y = -0.05;
+    this.ground.position.y = -1.6;
     this.scene.add(this.ground);
 
     this.trackGroup = new THREE.Group();
@@ -535,11 +536,14 @@ export class RallyScene {
       ];
 
       for (const q of quads) {
-        // Pick geometry + material + ground height per biome.
+        // Pick geometry + material + ground height per biome. Land / forest /
+        // mountain tops sit at y=0 (top of the quad surface) so the world
+        // reads as a flat continuous tile plane; water sinks below; road
+        // rides a touch above so its dashes don't z-fight with the grass.
         let geom, yPos;
-        if (q.biome === WATER)        { geom = quadWater;  yPos = -0.50; }
-        else if (q.biome === ROAD)    { geom = quadRoad;   yPos =  0.04; }
-        else                          { geom = quadGround; yPos = -0.20; }
+        if (q.biome === WATER)        { geom = quadWater;  yPos = -0.45; }
+        else if (q.biome === ROAD)    { geom = quadRoad;   yPos =  0.05; }
+        else                          { geom = quadGround; yPos = -0.10; }
         const mat = matFor(q.biome, q.gx, q.gy);
         const ground = new THREE.Mesh(geom, mat);
         ground.position.set(t.cx + q.dx, yPos, t.cy + q.dz);
