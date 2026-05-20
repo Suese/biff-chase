@@ -198,17 +198,14 @@ export function astar(start, end, biomeMap, excludeKeys = null) {
 
 // ---- Road carving -------------------------------------------------------
 
-// Visit each checkpoint in order, running A* between consecutive ones, and
-// returning the full closed loop of road cells. The closing segment from
-// the last checkpoint back to the first is what makes the track loop.
-//
-// We DO NOT exclude previously-used cells here — doing so could leave the
-// closing leg unreachable (everything around the start is fenced off by
-// the earlier segments). Allowing path overlap is harmless: dilation +
-// auto-tiling collapse duplicates into a single road area, and the
-// closing path can always find its way back to checkpoint 0.
+// Visit each checkpoint in order, running A* between consecutive ones.
+// EVERY segment must be able to reach its endpoint without crossing any
+// cell used by an earlier segment (no road may overlap itself). If any
+// segment fails to find a path — including the closing leg from the last
+// checkpoint back to the first — the function returns null and the caller
+// should retry with a fresh set of checkpoints.
 export function carveRoad(checkpoints, biomeMap) {
-  if (!checkpoints || checkpoints.length < 2) return [];
+  if (!checkpoints || checkpoints.length < 2) return null;
   const cells = [];
   const usedKeys = new Set();
   const keyOf = (c) => `${c.gx},${c.gy}`;
@@ -216,13 +213,17 @@ export function carveRoad(checkpoints, biomeMap) {
   for (let i = 0; i < checkpoints.length; i++) {
     const a = checkpoints[i];
     const b = checkpoints[(i + 1) % checkpoints.length];
-    const path = astar(a, b, biomeMap);
-    if (!path) continue;
-    const start = (i === 0) ? 0 : 1;
+    const exclude = new Set(usedKeys);
+    // The endpoints themselves must be reachable this run, even if used.
+    exclude.delete(keyOf(a));
+    exclude.delete(keyOf(b));
+    const path = astar(a, b, biomeMap, exclude);
+    if (!path) return null;          // can't close — caller picks new checkpoints
+    const start = (i === 0) ? 0 : 1; // share endpoint with previous segment
     for (let j = start; j < path.length; j++) {
       const c = path[j];
       const k = keyOf(c);
-      if (usedKeys.has(k)) continue;     // collapse repeats; the loop still closes
+      if (usedKeys.has(k)) continue;
       usedKeys.add(k);
       cells.push(c);
     }

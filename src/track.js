@@ -29,14 +29,20 @@ export function generateTrack(seed) {
   // 1. Biome map.
   const biomeMap = generateBiomeMap(seed);
 
-  // 2. Checkpoints (road waypoints).
-  let waypoints = pickCheckpoints(biomeMap, rng, 6);
-  if (waypoints.length < 3) waypoints = pickCheckpoints(biomeMap, rng, 4);
-
-  // 3. A* carving.
-  let roadCells = carveRoad(waypoints, biomeMap);
-  if (roadCells.length < 8) {
-    // Fallback square loop in case the noise produced an unraceable map.
+  // 2–3. Pick checkpoints + carve a non-self-overlapping closed road. If
+  // the closing leg can't find a clear path because previous segments
+  // have fenced off the start, throw the whole attempt away and try
+  // again with a fresh set of checkpoints. Up to 30 tries before falling
+  // back to a guaranteed square loop.
+  let roadCells = null;
+  for (let attempt = 0; attempt < 30 && !roadCells; attempt++) {
+    const waypoints = pickCheckpoints(biomeMap, rng, 6);
+    if (waypoints.length < 3) continue;
+    const carved = carveRoad(waypoints, biomeMap);
+    if (carved && carved.length >= 8) roadCells = carved;
+  }
+  if (!roadCells) {
+    // Last-ditch square loop centred on the grid.
     const cx = Math.floor(GRID_SIZE / 2), cy = Math.floor(GRID_SIZE / 2);
     const R = 8;
     roadCells = [];
