@@ -146,19 +146,19 @@ export class Audio {
     this.beep(n === 0 ? 1320 : 660, 0.18, 'sine', n === 0 ? 0.4 : 0.3);
   }
 
-  // Engine drone — call .start() once when entering the race and pass speed/RPM
-  // updates via .setEngine(speed, boost).
+  // Engine drone — quieter (~¼ of the previous level) and an octave lower
+  // so it sits underneath the action instead of sawing through it.
   startEngine() {
     if (this.engineNodes) return;
     const ctx = this.ensure();
     const osc = ctx.createOscillator();
     osc.type = 'sawtooth';
-    osc.frequency.value = 70;
+    osc.frequency.value = 35;
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
     lp.frequency.value = 700;
     const gain = ctx.createGain();
-    gain.gain.value = this.muted ? 0 : 0.08;
+    gain.gain.value = this.muted ? 0 : 0.02;
     osc.connect(lp).connect(gain).connect(ctx.destination);
     osc.start();
     this.engineNodes = { osc, lp, gain };
@@ -170,9 +170,13 @@ export class Audio {
   }
   setEngine(speedKMH, boost) {
     if (!this.engineNodes) return;
-    const baseFreq = 70 + Math.min(1, speedKMH / 240) * 240 + (boost ? 60 : 0);
+    // Octave-down range: 35–155 Hz, +30 on boost.
+    const baseFreq = 35 + Math.min(1, speedKMH / 240) * 120 + (boost ? 30 : 0);
     this.engineNodes.osc.frequency.value = baseFreq;
     this.engineNodes.lp.frequency.value = 600 + Math.min(1, speedKMH / 240) * 1800;
-    this.engineNodes.gain.gain.value = this.muted ? 0 : (0.04 + Math.min(1, speedKMH / 240) * 0.07);
+    // ¼ of the previous gain (was 0.04–0.11).
+    this.engineNodes.gain.gain.value = this.muted
+      ? 0
+      : (0.010 + Math.min(1, speedKMH / 240) * 0.018);
   }
 }
