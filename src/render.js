@@ -180,46 +180,33 @@ export class RallyScene {
   resetCamera() { this._cameraSet = false; }
 
   _driveTick(dt) {
-    // ---- Camera follow + lazy yaw rotation
+    // ---- Camera follow (position only). World orientation stays fixed —
+    // the car spins in place, the camera doesn't whip around behind it.
     if (this._cameraTarget) {
       const tgt = this._cameraTarget;
       if (!this._cameraSet) {
         this.cameraPos.x = tgt.x;
         this.cameraPos.z = tgt.y;
-        if (tgt.angle != null) this.cameraAngle = tgt.angle;
         this._cameraSet = true;
       } else {
         const kPos = 1 - Math.pow(0.001, dt);
         this.cameraPos.x += (tgt.x - this.cameraPos.x) * kPos;
         this.cameraPos.z += (tgt.y - this.cameraPos.z) * kPos;
-        if (tgt.angle != null) {
-          const kAng = 1 - Math.pow(0.10, dt);   // slower than position
-          this.cameraAngle += shortestAngleDelta(this.cameraAngle, tgt.angle) * kAng;
-        }
       }
     }
     this.cameraZoom += (this.targetZoom - this.cameraZoom) * (1 - Math.pow(0.001, dt));
 
-    // Chase camera: position behind the car in the direction opposite to its
-    // forward heading. Game forward at angle 0 = +X axis; in world coords
-    // (x, 0, y), forward is (cos a, 0, sin a).
-    const ang = this.cameraAngle;
-    const fwdX = Math.cos(ang);
-    const fwdZ = Math.sin(ang);
-    // Pull-back distance + height scale with zoom: higher zoom = closer cam.
-    const dist   = 250 / this.cameraZoom;
-    const height = 180 / this.cameraZoom;
-    const lookAhead = 60;
+    // Tilted top-down. Camera high above the target, with a small +Z offset
+    // so the view tilts forward by ~15° from vertical — enough to give 3D
+    // depth without losing the top-down readability.
+    const height  = 360 / this.cameraZoom;
+    const offsetZ =  90 / this.cameraZoom;
     this.camera.position.set(
-      this.cameraPos.x - fwdX * dist,
+      this.cameraPos.x,
       height,
-      this.cameraPos.z - fwdZ * dist,
+      this.cameraPos.z + offsetZ,
     );
-    this.camera.lookAt(
-      this.cameraPos.x + fwdX * lookAhead,
-      18,
-      this.cameraPos.z + fwdZ * lookAhead,
-    );
+    this.camera.lookAt(this.cameraPos.x, 0, this.cameraPos.z);
 
     // ---- Particles
     for (let i = this.particles.length - 1; i >= 0; i--) {
