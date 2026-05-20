@@ -36,7 +36,8 @@ export const UPGRADES = {
 
 // Resolve car stats from base + upgrade levels. All physics tuning lives here.
 // Scale reference: car length 56 px ≈ 4.5 m → 1 m ≈ 12.4 px.
-// maxSpeed 720 px/sec ≈ 58 m/sec ≈ 210 km/h — realistic arcade top speed.
+//   ~120 km/h ≈ 410 px/sec    (stock)
+//   ~280 km/h ≈ 965 px/sec    (engine fully upgraded)
 
 export function computeStats(upgrades = {}) {
   const eng = upgrades.engine || 0;
@@ -44,12 +45,12 @@ export function computeStats(upgrades = {}) {
   const arm = upgrades.armor  || 0;
   const fue = upgrades.fuel   || 0;
   return {
-    maxSpeed:   720 + eng * 90,
-    accel:     1200 + eng * 220,
-    brake:     1500 + eng * 80,
-    reverse:    340 + eng * 40,
+    maxSpeed:   410 + eng * 110,    // ~120 km/h stock, ~280 km/h at max upgrade
+    accel:      560 + eng * 180,    // stock 0→top in ~0.7s; less twitchy on tap
+    brake:      950 + eng * 70,
+    reverse:    220 + eng * 35,
     grip:       0.55 + tir * 0.10,
-    turnSpeed:  3.6 + tir * 0.40,
+    turnSpeed:  3.4 + tir * 0.40,
     armor:      400 + arm * 140,
     nitroMul:   1.0 + fue * 0.25,
     nitroBoost: 1.45 + eng * 0.05,
