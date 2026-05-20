@@ -52,7 +52,7 @@ export function computeStats(upgrades = {}) {
     brake:     16    + eng * 4,     // m/s²
     reverse:    6    + eng * 1.5,   // m/s
     grip:       0.40 + tir * 0.10,  // dimensionless; lower = tires slip more
-    turnSpeed:  2.4  + tir * 0.30,  // rad/s (max yaw rate when going fast)
+    turnSpeed:  0.6  + tir * 0.075, // rad/s — calmer, ~4× less twitchy
     armor:    400    + arm * 140,
     nitroMul:   1.0  + fue * 0.25,
     nitroBoost: 1.45 + eng * 0.05,
