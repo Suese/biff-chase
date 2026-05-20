@@ -167,6 +167,7 @@ export class RallyScene {
 
   // ---- Track build (CSG union of trapezoid tiles)
   buildTrack(track) {
+    if (!track || !track.tiles) return;     // slim snapshot; nothing to build
     this._currentTrack = track;
     // Wipe previous race's meshes.
     while (this.trackGroup.children.length) {
@@ -484,7 +485,7 @@ export class RallyScene {
   // ---- Minimap — 2D canvas inside #minimap div.
   drawMinimap(state, myId) {
     const ctx = this.minimapCtx;
-    if (!ctx || !this._currentTrack) return;
+    if (!ctx || !this._currentTrack || !this._currentTrack.tiles) return;
     const W = this.minimapCanvas.width;
     const H = this.minimapCanvas.height;
     ctx.clearRect(0, 0, W, H);

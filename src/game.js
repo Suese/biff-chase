@@ -616,6 +616,7 @@ export class GameRoom {
         seed: this.track.seed,
         centerline: this.track.centerline,
         widths: this.track.widths,
+        tiles: this.track.tiles,
         inner: this.track.inner,
         outer: this.track.outer,
         start: this.track.start,
