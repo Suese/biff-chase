@@ -191,14 +191,18 @@ export function stepCar(body, dt) {
     y: (fwdSpeed * fy + latSpeed * ny) * dt,
   });
 
-  // ---- Steering. Authority scales with √speed and gets a meaningful boost
-  // while drifting so counter-steer feels responsive (fishtail recovery).
-  const speedNorm = Math.min(1, totalSpeed / stats.maxSpeed);
-  const baseAuthority = 0.30 + 0.70 * Math.sqrt(speedNorm);
+  // ---- Steering. A stationary car can't pivot — angular velocity is
+  // bounded by ω = v / R_min (the geometry of a real wheel turning), so it
+  // smoothly ramps from 0 at standstill up to stats.turnSpeed at higher
+  // speeds. Drift gives a counter-steer authority bonus so fishtail
+  // recovery stays responsive.
+  const minTurnRadius = 5;        // metres — tight rally turn radius
+  const omegaFromSpeed = Math.abs(fwdSpeed) / minTurnRadius;
+  const omegaCap = Math.min(stats.turnSpeed, omegaFromSpeed);
   const driftBonus = 1.0 + drift * 0.55;
   let steer = (input.left ? -1 : 0) + (input.right ? 1 : 0);
-  if (fwdSpeed < -10) steer *= -1;
-  const angVel = steer * stats.turnSpeed * baseAuthority * driftBonus * oiledMul;
+  if (fwdSpeed < -1) steer *= -1;
+  const angVel = steer * omegaCap * driftBonus * oiledMul;
   Matter.Body.setAngularVelocity(body, angVel * dt);
 
   body._fwdSpeed = fwdSpeed;
