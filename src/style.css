@@ -254,6 +254,25 @@ button.primary:hover:not(:disabled) {
 #speed-text { font-size: 36px; color: #ffce3d; font-weight: 700; line-height: 1; }
 #speed-label { font-size: 10px; color: #8b94a4; letter-spacing: 2px; margin-top: 4px; }
 
+#debug-panel {
+  position: absolute;
+  top: 220px; left: 12px;
+  background: rgba(10,12,18,0.85);
+  border: 1px solid #2a2f3a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #aab0bd;
+  max-width: 320px;
+  white-space: pre-wrap;
+  margin: 0;
+  pointer-events: none;
+}
+#debug-panel .ok { color: #7cf3a0; }
+#debug-panel .bad { color: #ff5060; }
+
 #controls-hint {
   position: absolute;
   top: 12px;

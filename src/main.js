@@ -165,6 +165,7 @@ async function startClient() {
   if (!myName) { ui.setLobbyStatus('Enter your name first.'); return; }
   ui.persistName(myName);
   ui.setLobbyStatus('Connecting...');
+  startJoinHeartbeat();
 
   client = new ClientNet();
   try {
@@ -216,6 +217,25 @@ inputTracker = createInputTracker(
     sendAction({ name: 'use_item' });
   }
 );
+
+// Re-send `join` every 1.5s until we see ourselves in the state. Belt-and-
+// braces against any timing where the first join action gets lost (or where
+// the host hasn't fully wired its action handler when the join arrives).
+let _joinHeartbeat = null;
+function startJoinHeartbeat() {
+  if (_joinHeartbeat) return;
+  const beat = () => {
+    if (mode !== 'client') return;
+    const seen = lastState?.players?.some(p => p.id === myId);
+    if (seen) return;  // stop once we're in the player list
+    if (client && client.conn && client.conn.open) {
+      client.send({ type: 'action', action: { name: 'join', value: myName } });
+    }
+    scheduleAfter(1500, beat);
+  };
+  scheduleAfter(1500, beat);
+  _joinHeartbeat = true;
+}
 
 function sendAction(action) {
   if (mode === 'host') {
@@ -388,6 +408,25 @@ window.addEventListener('keydown', () => {
   });
 });
 
+// Live debug panel — top-left, shows what the local client thinks the world
+// looks like. Useful for spotting "Player 2 sees only 1 car" bugs at a glance.
+function updateDebugPanel() {
+  const el = document.getElementById('debug-panel');
+  if (!el) return;
+  if (!lastState) { el.textContent = ''; return; }
+  const me = (myId || '').slice(0, 6);
+  const players = (lastState.players || []).map(p =>
+    `${p.id === myId ? '★' : ' '} ${(p.id || '').slice(0, 6)}  ${p.name}`
+  ).join('\n');
+  const cars = (lastState.cars || []).map(c =>
+    `${c.id === myId ? '★' : ' '} ${(c.id || '').slice(0, 6)}  pos=(${Math.round(c.x)},${Math.round(c.y)})  alive=${c.alive}`
+  ).join('\n');
+  el.textContent =
+    `me=${me} mode=${mode} phase=${lastState.phase}\n` +
+    `players (${(lastState.players || []).length}):\n${players || '  —'}\n` +
+    `cars (${(lastState.cars || []).length}):\n${cars || '  —'}`;
+}
+
 function angleDelta(a, b) {
   let d = b - a;
   while (d > Math.PI) d -= Math.PI * 2;
@@ -399,6 +438,7 @@ function angleDelta(a, b) {
 let countdownLastSec = -1;
 onGameTick((dt) => {
   if (!lastState) return;
+  updateDebugPanel();
   if (!_sceneReady) return;     // canvas isn't up yet — skip rendering
 
   // Dead-reckon all cars by their last reported velocity. This carries the
