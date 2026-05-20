@@ -1,198 +1,120 @@
-// Tile-based track generator.
+// Track generator (tile-grid native).
 //
-// A closed-loop track is built in three layers:
+// Grid cells are the PRIMARY data representation. Connectors emit chains
+// of cells; the assembled chain forms a closed cycle. From the cells we
+// derive:
+//   - tile placements (per-cell { type, rotation, roadType, cx, cy })
+//   - a centerline polyline (cell centres, one Chaikin smoothing pass)
+//   - per-vertex widths (from each cell's road type)
+//   - physics CSG trapezoids (from centerline + widths, used by clampToTrack)
+//   - checkpoints, pickup slots, world bounds
 //
-//  1. SECTIONS: a closed ring of ~10 anchor points around the origin
-//     defines the rough shape. Each consecutive pair of anchors becomes
-//     a "section" with its own bounding rectangle, a chosen CONNECTOR
-//     algorithm (winding, bezier sweep, maze, etc.), and a ROAD TYPE
-//     (pavement / gravel / ice).
-//
-//  2. CENTERLINE: each section's connector emits a polyline between its
-//     start and end anchors; the polylines are concatenated and lightly
-//     smoothed to make a single closed centerline.
-//
-//  3. TILES: the centerline is walked on a 4 m grid; each visited cell
-//     gets a tile (straight / corner / dual) chosen by which two edges of
-//     the cell the line enters and exits. The tile placer also tags the
-//     cell with the section's road type.
-//
-// Physics-side (clampToTrack) still consumes the trapezoid `tiles` derived
-// from the centerline + widths. Cosmetics come from `tilePlacements`.
+// The polyline is a derivative. It is NOT used to choose tile shapes —
+// tile shapes are chosen from each cell's grid neighbours.
 
 import { mulberry32, rfloat } from './rng.js';
 import { CONNECTORS, pickConnector } from './connectors.js';
-import { CELL_SIZE, placeTiles } from './tiles.js';
+import { CELL_SIZE, buildFromCellChain, chaikinClosed, expandWidths } from './tiles.js';
 
 const ROAD_TYPES = ['pavement', 'gravel', 'ice'];
 
-// ---- Section layout ------------------------------------------------------
+// ---- Anchor layout (in cells) -------------------------------------------
 
-function buildAnchors(rng) {
-  const N = 9 + Math.floor(rng() * 4);   // 9–12 sections
-  const baseR = 95;
-  const radJitter = 28;
-  const angularJitter = 0.18;
+function buildAnchorCells(rng) {
+  const N = 8 + Math.floor(rng() * 4);     // 8–11 anchor cells
+  // Base radius in CELLS, not metres.
+  const baseR = 22;
+  const radJitter = 6;
   const anchors = [];
   for (let i = 0; i < N; i++) {
-    const a = (i / N) * Math.PI * 2 + rfloat(rng, -angularJitter, angularJitter);
+    const angle = (i / N) * Math.PI * 2 + rfloat(rng, -0.12, 0.12);
     const r = baseR + rfloat(rng, -radJitter, radJitter);
-    anchors.push({ x: Math.cos(a) * r, y: Math.sin(a) * r });
+    anchors.push({
+      gx: Math.round(Math.cos(angle) * r),
+      gy: Math.round(Math.sin(angle) * r),
+    });
   }
   return anchors;
 }
 
-// A section's bounding rectangle is the AABB of its start/end with a margin.
-function sectionBounds(start, end) {
-  const margin = 14;
-  return {
-    minX: Math.min(start.x, end.x) - margin,
-    minY: Math.min(start.y, end.y) - margin,
-    maxX: Math.max(start.x, end.x) + margin,
-    maxY: Math.max(start.y, end.y) + margin,
-  };
-}
-
-// ---- Width / surface helpers --------------------------------------------
-
-function widthsForCenterline(pts, rng) {
-  const widthBase = 16;
-  const widthVar  = 4;
-  const phase = rng() * Math.PI * 2;
-  const freq = 3 + Math.floor(rng() * 3);
-  const widths = pts.map((_, i) => {
-    const t = (i / pts.length) * Math.PI * 2;
-    return widthBase + Math.sin(t * freq + phase) * widthVar;
-  });
-  // Guarantee start width for the 4-wide grid.
-  const startMin = 22;
-  const startRange = 16;
-  for (let i = 0; i < startRange; i++) {
-    const back = (pts.length - i) % pts.length;
-    widths[i] = Math.max(widths[i], startMin);
-    widths[back] = Math.max(widths[back], startMin);
-  }
-  return widths;
-}
-
-// ---- Maths ---------------------------------------------------------------
-
-function chaikinClosed(pts) {
-  const out = [];
-  const n = pts.length;
-  for (let i = 0; i < n; i++) {
-    const p = pts[i];
-    const q = pts[(i + 1) % n];
-    out.push({ x: 0.75 * p.x + 0.25 * q.x, y: 0.75 * p.y + 0.25 * q.y });
-    out.push({ x: 0.25 * p.x + 0.75 * q.x, y: 0.25 * p.y + 0.75 * q.y });
-  }
-  return out;
-}
-
-function resampleByArc(pts, spacing) {
-  const out = [];
-  let acc = 0;
-  out.push(pts[0]);
-  for (let i = 0; i < pts.length; i++) {
-    const a = pts[i];
-    const b = pts[(i + 1) % pts.length];
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const seg = Math.hypot(dx, dy);
-    let t = 0;
-    while (acc + seg - t >= spacing) {
-      const need = spacing - acc;
-      t += need;
-      acc = 0;
-      const u = t / seg;
-      out.push({ x: a.x + dx * u, y: a.y + dy * u });
-    }
-    acc += seg - t;
-  }
-  return out;
-}
-
-function normalize(v) {
-  const l = Math.hypot(v.x, v.y) || 1;
-  return { x: v.x / l, y: v.y / l };
-}
-
-// ---- Entry point ---------------------------------------------------------
+// ---- Entry --------------------------------------------------------------
 
 export function generateTrack(seed) {
   const rng = mulberry32(seed >>> 0);
 
-  // 1. Anchors → sections.
-  const anchors = buildAnchors(rng);
+  // 1. Anchor cells around the origin.
+  const anchors = buildAnchorCells(rng);
   const N = anchors.length;
-  const sections = [];
+
+  // 2. For each consecutive anchor pair, pick a connector and a road type.
+  //    Each connector returns a 4-connected chain of cells from A to B.
+  const cellSegments = [];          // [{cells, roadType, connectorKind}]
   for (let i = 0; i < N; i++) {
-    const start = anchors[i];
-    const end = anchors[(i + 1) % N];
-    const segLen = Math.hypot(end.x - start.x, end.y - start.y);
-    const connector = pickConnector(rng, segLen);
+    const a = anchors[i];
+    const b = anchors[(i + 1) % N];
+    const segCells = Math.abs(a.gx - b.gx) + Math.abs(a.gy - b.gy);
+    const connector = pickConnector(rng, segCells);
     const roadType = ROAD_TYPES[Math.floor(rng() * ROAD_TYPES.length)];
-    sections.push({
-      start, end,
-      connector,
-      roadType,
-      bounds: sectionBounds(start, end),
-    });
+    const cells = connector(a, b, rng).map(c => ({ ...c, roadType }));
+    cellSegments.push({ cells, roadType, connectorKind: connector.kind });
   }
 
-  // 2. Centerline assembly. Track which centerline indices belong to each
-  // section so the tile placer can tag them with the right road type.
-  const ctrl = [];
-  const sectionForIndex = [];   // parallel to `ctrl`
-  for (let i = 0; i < sections.length; i++) {
-    const s = sections[i];
-    if (i === 0) {
-      ctrl.push(s.start);
-      sectionForIndex.push(0);
+  // 3. Concatenate all segments into one closed cell chain. Trim the
+  //    first cell of each segment (except the very first) to avoid
+  //    duplicating anchors.
+  const chain = [];
+  for (let i = 0; i < cellSegments.length; i++) {
+    const cells = cellSegments[i].cells;
+    const start = (i === 0) ? 0 : 1;
+    for (let j = start; j < cells.length; j++) chain.push(cells[j]);
+  }
+  // Final dedupe: if the very last cell equals the first, drop it.
+  if (chain.length > 1
+      && chain[0].gx === chain[chain.length - 1].gx
+      && chain[0].gy === chain[chain.length - 1].gy) {
+    chain.pop();
+  }
+  // Also remove any other consecutive duplicates that snuck through.
+  const deduped = [];
+  for (const c of chain) {
+    if (!deduped.length || deduped[deduped.length - 1].gx !== c.gx || deduped[deduped.length - 1].gy !== c.gy) {
+      deduped.push(c);
     }
-    const inter = s.connector(s.start, s.end, s.bounds, rng);
-    for (const p of inter) {
-      ctrl.push(p);
-      sectionForIndex.push(i);
-    }
   }
 
-  // Light Chaikin smoothing softens section joins. We re-derive the
-  // parallel section index by nearest-neighbour-along-arc after smoothing.
-  let pts = chaikinClosed(ctrl);
+  // 4. Build placements + centerline + widths from the cell chain.
+  const { placements, centerline: rawCenterline, widths: rawWidths } = buildFromCellChain(deduped);
 
-  // Re-index sectionForIndex against the smoothed pts. Each smoothed point
-  // came from a pair of consecutive ctrl points; reuse the earlier section.
-  let smoothedSection = [];
-  for (let i = 0; i < pts.length; i++) {
-    smoothedSection.push(sectionForIndex[Math.floor(i / 2) % sectionForIndex.length]);
+  // 5. Smooth the centerline (one Chaikin pass softens cell-elbow corners).
+  let centerline = chaikinClosed(rawCenterline);
+  let widths = expandWidths(rawWidths);
+
+  // Widen the start area so the 4-wide spawn grid fits comfortably.
+  const startMin = 22;
+  const startRange = Math.min(20, centerline.length);
+  for (let i = 0; i < startRange; i++) {
+    const backIdx = (centerline.length - i) % centerline.length;
+    widths[i] = Math.max(widths[i], startMin);
+    widths[backIdx] = Math.max(widths[backIdx], startMin);
   }
 
-  // Resample at 3 m — same parallel-array trick.
-  const beforeLen = pts.length;
-  pts = resampleByArc(pts, 3);
-  const afterLen = pts.length;
-  const stride = beforeLen / afterLen;
-  const finalSectionForIndex = pts.map((_, i) => smoothedSection[Math.min(beforeLen - 1, Math.floor(i * stride))]);
-
-  // 3. Widths + start vector + checkpoints.
-  const widths = widthsForCenterline(pts, rng);
-
-  const start = pts[0];
+  // 6. Start / finish vector — tangent at centerline[0].
+  const start = centerline[0];
   const startTangent = normalize({
-    x: pts[1].x - pts[pts.length - 1].x,
-    y: pts[1].y - pts[pts.length - 1].y,
+    x: centerline[1].x - centerline[centerline.length - 1].x,
+    y: centerline[1].y - centerline[centerline.length - 1].y,
   });
   const startNormal = { x: -startTangent.y, y: startTangent.x };
 
-  // Checkpoints — evenly spaced.
+  // 7. Checkpoints — 8 evenly spaced.
   const numCheckpoints = 8;
-  const cpStep = Math.floor(pts.length / numCheckpoints);
+  const cpStep = Math.floor(centerline.length / numCheckpoints);
   const checkpoints = [];
   for (let i = 0; i < numCheckpoints; i++) {
-    const idx = (i * cpStep) % pts.length;
-    const cp = pts[idx];
-    const prev = pts[(idx - 1 + pts.length) % pts.length];
-    const next = pts[(idx + 1) % pts.length];
+    const idx = (i * cpStep) % centerline.length;
+    const cp = centerline[idx];
+    const prev = centerline[(idx - 1 + centerline.length) % centerline.length];
+    const next = centerline[(idx + 1) % centerline.length];
     const tx = next.x - prev.x, ty = next.y - prev.y;
     const tl = Math.hypot(tx, ty) || 1;
     const nx = -ty / tl, ny = tx / tl;
@@ -205,13 +127,13 @@ export function generateTrack(seed) {
     });
   }
 
-  // Pickups — every ~75 m of track.
+  // 8. Pickup slots — every ~20 centerline points, alternating sides.
   const pickupSlots = [];
-  const pickupStep = 25;
-  for (let i = 0; i < pts.length; i += pickupStep) {
-    const p = pts[i];
-    const prev = pts[(i - 1 + pts.length) % pts.length];
-    const next = pts[(i + 1) % pts.length];
+  const pickupStep = 22;
+  for (let i = 0; i < centerline.length; i += pickupStep) {
+    const p = centerline[i];
+    const prev = centerline[(i - 1 + centerline.length) % centerline.length];
+    const next = centerline[(i + 1) % centerline.length];
     const tx = next.x - prev.x, ty = next.y - prev.y;
     const tl = Math.hypot(tx, ty) || 1;
     const nx = -ty / tl, ny = tx / tl;
@@ -219,11 +141,11 @@ export function generateTrack(seed) {
     pickupSlots.push({ x: p.x + nx * off, y: p.y + ny * off });
   }
 
-  // Physics CSG trapezoids.
+  // 9. Physics CSG trapezoids.
   const phyTiles = [];
-  for (let i = 0; i < pts.length; i++) {
-    const a = pts[i];
-    const b = pts[(i + 1) % pts.length];
+  for (let i = 0; i < centerline.length; i++) {
+    const a = centerline[i];
+    const b = centerline[(i + 1) % centerline.length];
     const dx = b.x - a.x, dy = b.y - a.y;
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;
@@ -241,11 +163,11 @@ export function generateTrack(seed) {
     });
   }
 
-  // Legacy inner/outer (still used by minimap).
+  // Minimap inner/outer (cheap derivation).
   const inner = phyTiles.map(t => ({ x: t.al.x, y: t.al.y }));
   const outer = phyTiles.map(t => ({ x: t.ar.x, y: t.ar.y }));
 
-  // World bounds.
+  // 10. World bounds.
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const t of phyTiles) {
     for (const c of [t.al, t.ar, t.bl, t.br]) {
@@ -261,24 +183,22 @@ export function generateTrack(seed) {
     maxX: maxX + pad, maxY: maxY + pad,
   };
 
-  // 4. Tile placements for rendering. Each cell gets a tile chosen by the
-  // edges where the centerline enters/exits, tagged with its section's
-  // road type.
-  const tilePlacements = placeTiles(pts, (idx) => sections[finalSectionForIndex[idx]].roadType);
-
-  // Mark sections in the snapshot for client logging.
-  const sectionSummary = sections.map(s => ({ connector: s.connector.kind, roadType: s.roadType }));
+  // 11. Section summary for the log line.
+  const sections = cellSegments.map(s => ({
+    connector: s.connectorKind,
+    roadType: s.roadType,
+  }));
 
   return {
     seed,
-    centerline: pts,
+    centerline,
     widths,
-    tiles: phyTiles,            // physics-side CSG trapezoids
-    tilePlacements,             // render-side half-tile placements
+    tiles: phyTiles,
+    tilePlacements: placements,
     cellSize: CELL_SIZE,
     inner,
     outer,
-    sections: sectionSummary,
+    sections,
     start: {
       x: start.x, y: start.y,
       tx: startTangent.x, ty: startTangent.y,
@@ -291,8 +211,12 @@ export function generateTrack(seed) {
   };
 }
 
-// ---- Grid spawn -- unchanged ---------------------------------------------
+function normalize(v) {
+  const l = Math.hypot(v.x, v.y) || 1;
+  return { x: v.x / l, y: v.y / l };
+}
 
+// Grid spawn — unchanged.
 export function gridSpawnPositions(track, count) {
   const { start } = track;
   const slots = [];

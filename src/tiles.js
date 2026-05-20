@@ -1,178 +1,151 @@
-// Half-tile road system.
+// Tile system: cell chain → tile placements + derived centerline.
 //
-// Cells are 4m × 4m. A track is built by walking a continuous polyline
-// (the centerline) and figuring out, for each cell the line passes through,
-// where it enters and where it exits the cell. From those two edges we pick
-// a TILE TYPE and a ROTATION; the renderer instantiates a pre-authored
-// mesh oriented to match.
+// Connectors emit a 4-connected chain of grid cells. From that chain we
+// can read each cell's entry edge (= direction from the previous cell)
+// and exit edge (= direction to the next cell), pick a tile shape
+// (straight if edges are opposite, corner if adjacent), and a rotation
+// that maps the canonical orientation onto the observed pair.
 //
-// Edges are numbered:  0=N (top), 1=E, 2=S (bottom), 3=W. The CELL_SIZE
-// constant defines metres per cell. Tile rotation is in radians around the
-// cell's vertical (Y) axis.
+// The centerline polyline (used by physics + cars + minimap) is DERIVED
+// from the cell chain — at every cell we drop the centerline-snap-point
+// that the tile's road-line passes through. For a straight tile this is
+// just the cell centre; for a corner it's still the centre (the renderer
+// draws the apex curve). One Chaikin pass smooths it for nice arcs.
 //
-// "Smart mapping": rather than authoring every combination of entry/exit,
-// each unique unordered edge pair maps to ONE base mesh, with a rotation
-// derived from how the canonical pair (N→S for straights, N→E for corners)
-// rotates onto the observed pair.
-//
-// Tile shapes:
-//   - 'straight'   — road runs straight across opposite edges (N↔S).
-//   - 'corner'     — 90° turn between adjacent edges (N↔E).
-//   - 'dual'       — straight section with a centre median (N↔S).
-//
-// Road surface materials are picked per tile from the section's road type
-// ('pavement' | 'gravel' | 'ice').
+// Cells are 4m × 4m.
 
-export const CELL_SIZE = 4;       // metres per half-tile cell
+export const CELL_SIZE = 4;
 
-// --- Tile classification --------------------------------------------------
-
-// Determine which edge of a cell a point belongs to, given the cell's
-// local x/y range. Returns 0..3 (N/E/S/W) or -1 if the point is interior.
-function classifyEdge(p, cell) {
-  const lx = p.x - cell.x;       // local 0..CELL_SIZE
-  const ly = p.y - cell.y;
-  // Snap to whichever edge the point is closest to (with a tolerance).
-  const dN = ly;                 // distance from top (smaller y assumed top)
-  const dS = CELL_SIZE - ly;
-  const dW = lx;
-  const dE = CELL_SIZE - lx;
-  const best = Math.min(dN, dE, dS, dW);
-  if (best === dN) return 0;
-  if (best === dE) return 1;
-  if (best === dS) return 2;
-  return 3;
+// Octilinear edge numbers used elsewhere in the codebase: 0=N (–Y direction
+// in world / game), 1=E (+X), 2=S (+Y), 3=W (–X).
+// For our cell-step logic we use the convention that going from cell (gx,gy)
+// to cell (gx,gy-1) means the SECOND cell was entered from its SOUTH edge
+// (since the line came from below... wait that's backwards). Let me state
+// the convention clearly:
+//   World-Y goes from -Y (north) to +Y (south) in the game's 2D coords.
+//   So if cell B is north of cell A (B.gy = A.gy - 1), then the chain
+//   enters B from its SOUTH edge (the edge B shares with A).
+//
+//   gy decreases → moved NORTH → cell entered through its SOUTH edge.
+//   gy increases → moved SOUTH → cell entered through its NORTH edge.
+//   gx increases → moved EAST   → cell entered through its WEST edge.
+//   gx decreases → moved WEST   → cell entered through its EAST edge.
+function enteredEdge(from, to) {
+  if (to.gy < from.gy) return 2;        // came from south
+  if (to.gy > from.gy) return 0;        // came from north
+  if (to.gx > from.gx) return 3;        // came from west
+  if (to.gx < from.gx) return 1;        // came from east
+  return -1;
+}
+function exitedEdge(from, to) {
+  // Edge of `from` through which we leave toward `to`.
+  if (to.gy < from.gy) return 0;        // leave through north
+  if (to.gy > from.gy) return 2;        // leave through south
+  if (to.gx > from.gx) return 1;        // leave through east
+  if (to.gx < from.gx) return 3;        // leave through west
+  return -1;
 }
 
-// Pick the tile shape from an (entryEdge, exitEdge) pair. Returns
-// { type, rotation } where rotation is in radians around world Y.
-//
-// The canonical orientations are:
-//   straight  — N↔S   (canonical: 0..2 → rotation 0)
-//   corner    — N→E   (canonical: 0→1 → rotation 0)
-//   diagonal_straight is not yet authored; falls back to straight.
-function pickTile(entryEdge, exitEdge) {
+// Canonical orientations:
+//   straight  — N↔S: rotation 0      (entry/exit edges 0 & 2)
+//                E↔W: rotation π/2
+//   corner    — N→E (entry 0, exit 1): rotation 0
+//                E→S (entry 1, exit 2): rotation π/2
+//                S→W (entry 2, exit 3): rotation π
+//                W→N (entry 3, exit 0): rotation -π/2
+function pickShape(entryEdge, exitEdge) {
   if (entryEdge < 0 || exitEdge < 0 || entryEdge === exitEdge) {
-    // Degenerate — render a straight as a fallback.
     return { type: 'straight', rotation: 0 };
   }
-  // Opposite edges → straight.
   if ((entryEdge + 2) % 4 === exitEdge) {
-    // Canonical N↔S. Rotate by entry edge × 90° (radians: × π/2).
-    // N(0)↔S(2) → 0; E(1)↔W(3) → π/2.
-    const rot = (entryEdge % 2) * (Math.PI / 2);
-    return { type: 'straight', rotation: rot };
+    return { type: 'straight', rotation: (entryEdge % 2) * (Math.PI / 2) };
   }
-  // Adjacent edges → corner. Canonical N→E (0→1). Map other pairs by
-  // rotating the canonical so that "entry edge" matches.
-  const pair = [entryEdge, exitEdge];
-  // Treat pair as unordered: canonical pairs and their rotations.
-  const canonical = [
-    { a: 0, b: 1, rot: 0 },                  // N↔E
-    { a: 1, b: 2, rot: Math.PI / 2 },        // E↔S
-    { a: 2, b: 3, rot: Math.PI },            // S↔W
-    { a: 3, b: 0, rot: -Math.PI / 2 },       // W↔N
+  // Adjacent edges → corner.
+  const map = [
+    { a: 0, b: 1, rot: 0 },
+    { a: 1, b: 2, rot: Math.PI / 2 },
+    { a: 2, b: 3, rot: Math.PI },
+    { a: 3, b: 0, rot: -Math.PI / 2 },
   ];
-  for (const c of canonical) {
-    if ((pair[0] === c.a && pair[1] === c.b) || (pair[0] === c.b && pair[1] === c.a)) {
+  for (const c of map) {
+    if ((entryEdge === c.a && exitEdge === c.b) || (entryEdge === c.b && exitEdge === c.a)) {
       return { type: 'corner', rotation: c.rot };
     }
   }
   return { type: 'straight', rotation: 0 };
 }
 
-// --- Placer ---------------------------------------------------------------
+// cells: 4-connected closed chain of {gx, gy, roadType?}
+// Returns:
+//   { placements: [{gx,gy,cx,cy,type,rotation,roadType}],
+//     centerline: [{x,y}],     // closed polyline, one point per cell
+//     widths:     [width],     // per centerline vertex; from per-cell roadWidth
+//   }
+export function buildFromCellChain(cells) {
+  const N = cells.length;
+  if (N < 3) return { placements: [], centerline: [], widths: [] };
 
-// Walk the centerline and emit one tile placement per visited cell.
-// Returns [{ cellX, cellY, centerX, centerY, type, rotation, roadType }, ...]
-//
-// roadType is picked per cell from the per-centerline-index `roadTypeAt`
-// callback (so a section's road material lays down evenly across all its
-// cells).
-export function placeTiles(centerline, roadTypeAt) {
-  const cells = new Map();    // "gx,gy" -> { gx, gy, x, y, firstIdx, lastIdx, count }
-  const N = centerline.length;
-  for (let i = 0; i < N; i++) {
-    const p = centerline[i];
-    const gx = Math.floor(p.x / CELL_SIZE);
-    const gy = Math.floor(p.y / CELL_SIZE);
-    const key = `${gx},${gy}`;
-    let cell = cells.get(key);
-    if (!cell) {
-      cell = {
-        gx, gy,
-        x: gx * CELL_SIZE,
-        y: gy * CELL_SIZE,
-        firstIdx: i,
-        lastIdx: i,
-        count: 0,
-      };
-      cells.set(key, cell);
-    }
-    cell.lastIdx = i;
-    cell.count += 1;
-  }
-
-  // Determine entry/exit edges per cell.
   const placements = [];
-  for (const cell of cells.values()) {
-    // Take the centerline points right before entry and right after exit
-    // to figure out which edges of the cell the path crosses.
-    const beforeIdx = (cell.firstIdx - 1 + N) % N;
-    const afterIdx  = (cell.lastIdx + 1) % N;
-    const inPoint   = centerline[beforeIdx];
-    const outPoint  = centerline[afterIdx];
+  const centerline = [];
+  const widths = [];
 
-    // Bring those points to the cell-local edge by linearly extending from
-    // the first/last cell-interior point until we cross a boundary.
-    const firstInside = centerline[cell.firstIdx];
-    const lastInside  = centerline[cell.lastIdx];
-    const entryEdge = edgeOfCrossing(inPoint, firstInside, cell);
-    const exitEdge  = edgeOfCrossing(lastInside, outPoint, cell);
+  for (let i = 0; i < N; i++) {
+    const prev = cells[(i - 1 + N) % N];
+    const cur  = cells[i];
+    const next = cells[(i + 1) % N];
+    const entryEdge = enteredEdge(prev, cur);
+    const exitEdge  = exitedEdge(cur, next);
+    const shape = pickShape(entryEdge, exitEdge);
+    const cx = cur.gx * CELL_SIZE + CELL_SIZE / 2;
+    const cy = cur.gy * CELL_SIZE + CELL_SIZE / 2;
 
-    const tile = pickTile(entryEdge, exitEdge);
     placements.push({
-      gx: cell.gx,
-      gy: cell.gy,
-      cx: cell.x + CELL_SIZE / 2,
-      cy: cell.y + CELL_SIZE / 2,
-      type: tile.type,
-      rotation: tile.rotation,
-      roadType: roadTypeAt(cell.firstIdx),
+      gx: cur.gx,
+      gy: cur.gy,
+      cx, cy,
+      type: shape.type,
+      rotation: shape.rotation,
+      roadType: cur.roadType || 'pavement',
+      entryEdge,
+      exitEdge,
     });
+
+    centerline.push({ x: cx, y: cy });
+    // Width per cell: roadType drives this.
+    widths.push(roadWidthFor(cur.roadType || 'pavement'));
   }
-  return placements;
+
+  return { placements, centerline, widths };
 }
 
-// Find which edge of `cell` the segment a→b crosses (a outside cell, b
-// inside, or vice versa). Returns 0/1/2/3 (N/E/S/W) or -1 if no crossing.
-function edgeOfCrossing(a, b, cell) {
-  const x0 = cell.x, x1 = cell.x + CELL_SIZE;
-  const y0 = cell.y, y1 = cell.y + CELL_SIZE;
-  const dx = b.x - a.x, dy = b.y - a.y;
-  if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) return -1;
-  // Parametric line, find where it intersects each cell edge.
-  const candidates = [];
-  if (dy !== 0) {
-    const tN = (y0 - a.y) / dy; if (tN >= 0 && tN <= 1) {
-      const x = a.x + dx * tN; if (x >= x0 && x <= x1) candidates.push({ t: tN, edge: 0 });
-    }
-    const tS = (y1 - a.y) / dy; if (tS >= 0 && tS <= 1) {
-      const x = a.x + dx * tS; if (x >= x0 && x <= x1) candidates.push({ t: tS, edge: 2 });
-    }
+function roadWidthFor(roadType) {
+  // Pavement is the widest 4-lane racing surface; gravel and ice slightly
+  // narrower for visual variety.
+  if (roadType === 'gravel') return 9.5;
+  if (roadType === 'ice')    return 10.5;
+  return 11;   // pavement
+}
+
+// One Chaikin pass on a closed polyline — used to smooth the cell-centre
+// centerline so cars + physics see flowing arcs through the corners
+// instead of sharp 90° elbow joints.
+export function chaikinClosed(pts) {
+  const out = [];
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % n];
+    out.push({ x: 0.75 * p.x + 0.25 * q.x, y: 0.75 * p.y + 0.25 * q.y });
+    out.push({ x: 0.25 * p.x + 0.75 * q.x, y: 0.25 * p.y + 0.75 * q.y });
   }
-  if (dx !== 0) {
-    const tE = (x1 - a.x) / dx; if (tE >= 0 && tE <= 1) {
-      const y = a.y + dy * tE; if (y >= y0 && y <= y1) candidates.push({ t: tE, edge: 1 });
-    }
-    const tW = (x0 - a.x) / dx; if (tW >= 0 && tW <= 1) {
-      const y = a.y + dy * tW; if (y >= y0 && y <= y1) candidates.push({ t: tW, edge: 3 });
-    }
-  }
-  if (!candidates.length) {
-    // Fallback: pick the closest edge to the inside point b.
-    return classifyEdge(b, cell);
-  }
-  candidates.sort((a, b) => a.t - b.t);
-  return candidates[0].edge;
+  return out;
+}
+
+export function expandWidths(widths) {
+  // After a Chaikin pass each input width becomes two output widths (an
+  // 0.75/0.25 mix would be needed for perfect accuracy, but per-vertex
+  // road width changes slowly so simple duplication is fine).
+  const out = [];
+  for (const w of widths) { out.push(w); out.push(w); }
+  return out;
 }

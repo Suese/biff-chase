@@ -1,362 +1,363 @@
-// Track connector library. Each connector takes (start, end, bounds, rng)
-// and returns a polyline (array of {x, y}) going FROM start TO end, NOT
-// including the start point (so concatenated runs don't duplicate joins).
+// Tile-grid connectors.
 //
-// All connectors stay inside their `bounds` rectangle as best as possible
-// — some clamp explicitly, others use sub-radii that respect the box.
-//
-// `bounds` is {minX, minY, maxX, maxY} in metres. `rng` is mulberry32().
+// Each connector emits a CHAIN OF GRID CELLS (not a polyline). The chain
+// goes from anchor cell A to anchor cell B; consecutive cells in the chain
+// must share an edge (4-connected) so the placer can read the entry/exit
+// edges and pick a tile shape. Connectors that naturally produce diagonal
+// or curved moves run their output through a 4-connector step expander
+// that inserts axis-aligned intermediate cells when needed.
 
-import { rfloat } from './rng.js';
+import { rfloat, rint } from './rng.js';
 
-// ---------- Helpers ----------
+// ---- Cell maths ---------------------------------------------------------
 
-function clampToBounds(p, bounds, margin = 2) {
-  return {
-    x: Math.max(bounds.minX + margin, Math.min(bounds.maxX - margin, p.x)),
-    y: Math.max(bounds.minY + margin, Math.min(bounds.maxY - margin, p.y)),
-  };
-}
+const key = (gx, gy) => `${gx},${gy}`;
+const eq = (a, b) => a.gx === b.gx && a.gy === b.gy;
 
-function frame(start, end) {
-  const dx = end.x - start.x, dy = end.y - start.y;
-  const len = Math.hypot(dx, dy) || 1;
-  return {
-    len,
-    ux: dx / len, uy: dy / len,            // forward
-    px: -dy / len, py: dx / len,           // left-perpendicular
-    start, end,
-  };
-}
-
-function bezierPoints(start, c1, c2, end, steps) {
+// Force a sequence of cells to be 4-connected by inserting intermediate
+// straight-line cells when consecutive entries jump more than one step.
+// Also dedupes consecutive duplicates.
+function makeConnected(cells) {
   const out = [];
-  for (let i = 1; i <= steps; i++) {
+  let prev = null;
+  for (const c of cells) {
+    if (prev && (c.gx !== prev.gx || c.gy !== prev.gy)) {
+      // Walk from prev to c one cell at a time. Always axis-aligned: do
+      // horizontal moves first when the gap is bigger in x, vertical otherwise.
+      let { gx, gy } = prev;
+      while (gx !== c.gx || gy !== c.gy) {
+        const dx = c.gx - gx;
+        const dy = c.gy - gy;
+        if (Math.abs(dx) > 0 && (Math.abs(dx) >= Math.abs(dy))) {
+          gx += Math.sign(dx);
+        } else {
+          gy += Math.sign(dy);
+        }
+        if (gx === prev.gx && gy === prev.gy) continue;  // shouldn't happen
+        out.push({ gx, gy });
+        prev = { gx, gy };
+      }
+    } else if (!prev) {
+      out.push(c);
+      prev = c;
+    }
+  }
+  // Final dedupe.
+  const dedup = [];
+  let last = null;
+  for (const c of out) {
+    if (!last || c.gx !== last.gx || c.gy !== last.gy) {
+      dedup.push(c);
+      last = c;
+    }
+  }
+  return dedup;
+}
+
+// ---- Connector helpers --------------------------------------------------
+
+function bresenham(ax, ay, bx, by) {
+  // Cells visited by a Bresenham line from (ax,ay) to (bx,by), inclusive.
+  const cells = [];
+  let x0 = ax, y0 = ay;
+  const x1 = bx, y1 = by;
+  const dx = Math.abs(x1 - x0);
+  const dy = Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy;
+  while (true) {
+    cells.push({ gx: x0, gy: y0 });
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 <  dx) { err += dx; y0 += sy; }
+  }
+  return cells;
+}
+
+function bezierSample(a, b, c1, c2, steps) {
+  const cells = [];
+  for (let i = 0; i <= steps; i++) {
     const t = i / steps;
     const mt = 1 - t;
-    out.push({
-      x: mt*mt*mt*start.x + 3*mt*mt*t*c1.x + 3*mt*t*t*c2.x + t*t*t*end.x,
-      y: mt*mt*mt*start.y + 3*mt*mt*t*c1.y + 3*mt*t*t*c2.y + t*t*t*end.y,
+    cells.push({
+      gx: Math.round(mt*mt*mt*a.gx + 3*mt*mt*t*c1.gx + 3*mt*t*t*c2.gx + t*t*t*b.gx),
+      gy: Math.round(mt*mt*mt*a.gy + 3*mt*mt*t*c1.gy + 3*mt*t*t*c2.gy + t*t*t*b.gy),
     });
   }
-  return out;
+  return cells;
 }
 
-// ---------- Connectors ----------
+// ---- Connector library --------------------------------------------------
 
-// 1. DIRECT — single line from a to b, sampled at fine spacing.
-export function connectorDirect(start, end, bounds, rng) {
-  const f = frame(start, end);
-  const steps = Math.max(4, Math.floor(f.len / 2));
-  const pts = [];
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    pts.push({ x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t });
-  }
-  return pts;
+// 1. DIRECT — straight line between anchors, 4-connected.
+export function connectorDirect(a, b, rng) {
+  return makeConnected(bresenham(a.gx, a.gy, b.gx, b.gy));
 }
 connectorDirect.kind = 'direct';
 
-// 2. BEZIER SWEEP — cubic curve with both control handles offset to one side.
-//    Reads as a long flowing arc.
-export function connectorBezierSweep(start, end, bounds, rng) {
-  const f = frame(start, end);
-  const off = (rng() < 0.5 ? 1 : -1) * f.len * rfloat(rng, 0.25, 0.45);
-  const c1 = clampToBounds({ x: start.x + f.ux * f.len * 0.33 + f.px * off, y: start.y + f.uy * f.len * 0.33 + f.py * off }, bounds);
-  const c2 = clampToBounds({ x: start.x + f.ux * f.len * 0.67 + f.px * off, y: start.y + f.uy * f.len * 0.67 + f.py * off }, bounds);
-  return bezierPoints(start, c1, c2, end, Math.max(14, Math.floor(f.len / 2)));
+// 2. BEZIER SWEEP — both control handles offset to the same side.
+export function connectorBezierSweep(a, b, rng) {
+  const dx = b.gx - a.gx, dy = b.gy - a.gy;
+  const len = Math.hypot(dx, dy) || 1;
+  const px = -dy / len, py = dx / len;
+  const off = (rng() < 0.5 ? 1 : -1) * len * rfloat(rng, 0.25, 0.45);
+  const c1 = { gx: a.gx + dx * 0.33 + px * off, gy: a.gy + dy * 0.33 + py * off };
+  const c2 = { gx: a.gx + dx * 0.67 + px * off, gy: a.gy + dy * 0.67 + py * off };
+  return makeConnected(bezierSample(a, b, c1, c2, Math.max(16, Math.floor(len * 2))));
 }
 connectorBezierSweep.kind = 'bezier_sweep';
 
-// 3. WINDING — chain of small sinusoidal wiggles perpendicular to the line.
-export function connectorWinding(start, end, bounds, rng) {
-  const f = frame(start, end);
-  const wiggles = 2 + Math.floor(rng() * 3);    // 2–4
-  const amp = Math.min(f.len * 0.10, 10);
-  const phaseShift = rng() * Math.PI * 2;
-  const steps = Math.max(32, Math.floor(f.len / 2));
-  const pts = [];
-  for (let i = 1; i <= steps; i++) {
+// 3. LAZY ARC — gentler bezier (smaller offset).
+export function connectorLazyArc(a, b, rng) {
+  const dx = b.gx - a.gx, dy = b.gy - a.gy;
+  const len = Math.hypot(dx, dy) || 1;
+  const px = -dy / len, py = dx / len;
+  const off = (rng() < 0.5 ? 1 : -1) * len * rfloat(rng, 0.10, 0.18);
+  const c1 = { gx: a.gx + dx * 0.4 + px * off, gy: a.gy + dy * 0.4 + py * off };
+  const c2 = { gx: a.gx + dx * 0.6 + px * off, gy: a.gy + dy * 0.6 + py * off };
+  return makeConnected(bezierSample(a, b, c1, c2, Math.max(12, Math.floor(len * 2))));
+}
+connectorLazyArc.kind = 'lazy_arc';
+
+// 4. WINDING — sinusoidal offset perpendicular to a-b.
+export function connectorWinding(a, b, rng) {
+  const dx = b.gx - a.gx, dy = b.gy - a.gy;
+  const len = Math.hypot(dx, dy) || 1;
+  const fx = dx / len, fy = dy / len;
+  const px = -fy, py = fx;
+  const wiggles = 2 + Math.floor(rng() * 3);
+  const amp = Math.min(len * 0.18, 5);
+  const phase = rng() * Math.PI * 2;
+  const steps = Math.max(20, Math.floor(len * 3));
+  const cells = [];
+  for (let i = 0; i <= steps; i++) {
     const t = i / steps;
-    const offset = Math.sin(t * wiggles * Math.PI * 2 + phaseShift) * amp;
-    const p = {
-      x: start.x + f.ux * f.len * t + f.px * offset,
-      y: start.y + f.uy * f.len * t + f.py * offset,
-    };
-    pts.push(clampToBounds(p, bounds));
+    const offset = Math.sin(t * wiggles * Math.PI * 2 + phase) * amp;
+    cells.push({
+      gx: Math.round(a.gx + fx * len * t + px * offset),
+      gy: Math.round(a.gy + fy * len * t + py * offset),
+    });
   }
-  return pts;
+  return makeConnected(cells);
 }
 connectorWinding.kind = 'winding';
 
-// 4. MEANDERING — pseudo-random walk smoothed via Bezier through control points.
-export function connectorMeandering(start, end, bounds, rng) {
-  const f = frame(start, end);
-  const segments = 3 + Math.floor(rng() * 3);   // 3–5
-  const ctrls = [start];
+// 5. MEANDERING — random walk on a smoothed path.
+export function connectorMeandering(a, b, rng) {
+  const dx = b.gx - a.gx, dy = b.gy - a.gy;
+  const len = Math.hypot(dx, dy) || 1;
+  const fx = dx / len, fy = dy / len;
+  const px = -fy, py = fx;
+  const segments = 3 + Math.floor(rng() * 3);
+  const ctrls = [a];
   for (let i = 1; i < segments; i++) {
     const t = i / segments;
-    const offMul = rfloat(rng, -0.18, 0.18);
-    const p = {
-      x: start.x + f.ux * f.len * t + f.px * f.len * offMul,
-      y: start.y + f.uy * f.len * t + f.py * f.len * offMul,
-    };
-    ctrls.push(clampToBounds(p, bounds));
+    const offMul = rfloat(rng, -0.20, 0.20);
+    ctrls.push({
+      gx: a.gx + fx * len * t + px * len * offMul,
+      gy: a.gy + fy * len * t + py * len * offMul,
+    });
   }
-  ctrls.push(end);
-
-  // Chain Beziers between consecutive control points.
+  ctrls.push(b);
   const out = [];
   for (let i = 0; i < ctrls.length - 1; i++) {
-    const a = ctrls[i];
-    const b = ctrls[i + 1];
+    const x = ctrls[i], y = ctrls[i + 1];
     const before = ctrls[Math.max(0, i - 1)];
     const after  = ctrls[Math.min(ctrls.length - 1, i + 2)];
-    // Catmull-Rom-like control offsets.
-    const c1 = { x: a.x + (b.x - before.x) * 0.18, y: a.y + (b.y - before.y) * 0.18 };
-    const c2 = { x: b.x - (after.x - a.x) * 0.18, y: b.y - (after.y - a.y) * 0.18 };
-    const len = Math.hypot(b.x - a.x, b.y - a.y);
-    for (const p of bezierPoints(a, c1, c2, b, Math.max(6, Math.floor(len / 2)))) {
-      out.push(clampToBounds(p, bounds));
-    }
+    const c1 = { gx: x.gx + (y.gx - before.gx) * 0.18, gy: x.gy + (y.gy - before.gy) * 0.18 };
+    const c2 = { gx: y.gx - (after.gx - x.gx) * 0.18, gy: y.gy - (after.gy - x.gy) * 0.18 };
+    const segLen = Math.hypot(y.gx - x.gx, y.gy - x.gy);
+    for (const c of bezierSample(x, y, c1, c2, Math.max(8, Math.floor(segLen * 2)))) out.push(c);
   }
-  return out;
+  return makeConnected(out);
 }
 connectorMeandering.kind = 'meandering';
 
-// 5. DOGLEG — straight, 45° kink to one side, straight again.
-export function connectorDogleg(start, end, bounds, rng) {
-  const f = frame(start, end);
-  const off = (rng() < 0.5 ? 1 : -1) * f.len * rfloat(rng, 0.15, 0.30);
-  const t1 = 0.35, t2 = 0.65;
-  const m1 = clampToBounds({ x: start.x + f.ux * f.len * t1 + f.px * off, y: start.y + f.uy * f.len * t1 + f.py * off }, bounds);
-  const m2 = clampToBounds({ x: start.x + f.ux * f.len * t2 + f.px * off, y: start.y + f.uy * f.len * t2 + f.py * off }, bounds);
-  const out = [];
-  for (const seg of [[start, m1], [m1, m2], [m2, end]]) {
-    const len = Math.hypot(seg[1].x - seg[0].x, seg[1].y - seg[0].y);
-    const steps = Math.max(2, Math.floor(len / 2));
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      out.push({ x: seg[0].x + (seg[1].x - seg[0].x) * t, y: seg[0].y + (seg[1].y - seg[0].y) * t });
-    }
-  }
-  return out;
+// 6. DOGLEG — straight, 45° kink, straight again.
+export function connectorDogleg(a, b, rng) {
+  const dx = b.gx - a.gx, dy = b.gy - a.gy;
+  const len = Math.hypot(dx, dy) || 1;
+  const fx = dx / len, fy = dy / len;
+  const px = -fy, py = fx;
+  const off = (rng() < 0.5 ? 1 : -1) * len * rfloat(rng, 0.15, 0.30);
+  const m1 = { gx: Math.round(a.gx + fx * len * 0.35 + px * off), gy: Math.round(a.gy + fy * len * 0.35 + py * off) };
+  const m2 = { gx: Math.round(a.gx + fx * len * 0.65 + px * off), gy: Math.round(a.gy + fy * len * 0.65 + py * off) };
+  return makeConnected([
+    ...bresenham(a.gx, a.gy, m1.gx, m1.gy),
+    ...bresenham(m1.gx, m1.gy, m2.gx, m2.gy).slice(1),
+    ...bresenham(m2.gx, m2.gy, b.gx, b.gy).slice(1),
+  ]);
 }
 connectorDogleg.kind = 'dogleg';
 
-// 6. DUAL STRAIGHT — straight line, BUT the road carries a centre median
-//    for its whole length. The polyline geometry is identical to a direct
-//    line; the renderer reads the section's `feature` tag to draw the median.
-export function connectorDualStraight(start, end, bounds, rng) {
-  return connectorDirect(start, end, bounds, rng);
+// 7. DUAL STRAIGHT — geometry is identical to direct (the median is a render-
+//    only detail driven by the section's road type and shape choice).
+export function connectorDualStraight(a, b, rng) {
+  return connectorDirect(a, b, rng);
 }
 connectorDualStraight.kind = 'dual_straight';
 
-// 7. WAVE — sinusoidal centerline with a single large wavelength.
-export function connectorWave(start, end, bounds, rng) {
-  const f = frame(start, end);
-  const amp = Math.min(f.len * 0.18, 12);
+// 8. WAVE — single large-period sinusoid.
+export function connectorWave(a, b, rng) {
+  const dx = b.gx - a.gx, dy = b.gy - a.gy;
+  const len = Math.hypot(dx, dy) || 1;
+  const fx = dx / len, fy = dy / len;
+  const px = -fy, py = fx;
+  const amp = Math.min(len * 0.22, 6);
   const period = rfloat(rng, 0.9, 1.5);
   const sign = rng() < 0.5 ? 1 : -1;
-  const steps = Math.max(32, Math.floor(f.len / 1.8));
-  const pts = [];
-  for (let i = 1; i <= steps; i++) {
+  const steps = Math.max(24, Math.floor(len * 3));
+  const cells = [];
+  for (let i = 0; i <= steps; i++) {
     const t = i / steps;
     const offset = Math.sin(t * Math.PI * period) * amp * sign;
-    pts.push(clampToBounds({
-      x: start.x + f.ux * f.len * t + f.px * offset,
-      y: start.y + f.uy * f.len * t + f.py * offset,
-    }, bounds));
+    cells.push({
+      gx: Math.round(a.gx + fx * len * t + px * offset),
+      gy: Math.round(a.gy + fy * len * t + py * offset),
+    });
   }
-  return pts;
+  return makeConnected(cells);
 }
 connectorWave.kind = 'wave';
 
-// 8. SWITCHBACK — alternating 45° kinks. Three S-shaped reversals.
-export function connectorSwitchback(start, end, bounds, rng) {
-  const f = frame(start, end);
-  const kinks = 3 + Math.floor(rng() * 2);  // 3 or 4
-  const amp = Math.min(f.len * 0.12, 8);
-  const ctrls = [start];
+// 9. SWITCHBACK — alternating cross-track kinks.
+export function connectorSwitchback(a, b, rng) {
+  const dx = b.gx - a.gx, dy = b.gy - a.gy;
+  const len = Math.hypot(dx, dy) || 1;
+  const fx = dx / len, fy = dy / len;
+  const px = -fy, py = fx;
+  const kinks = 3 + Math.floor(rng() * 2);
+  const amp = Math.min(len * 0.16, 5);
+  const ctrls = [a];
   for (let i = 1; i <= kinks; i++) {
     const t = i / (kinks + 1);
     const sign = (i % 2 === 0) ? 1 : -1;
-    const p = {
-      x: start.x + f.ux * f.len * t + f.px * amp * sign,
-      y: start.y + f.uy * f.len * t + f.py * amp * sign,
-    };
-    ctrls.push(clampToBounds(p, bounds));
+    ctrls.push({
+      gx: Math.round(a.gx + fx * len * t + px * amp * sign),
+      gy: Math.round(a.gy + fy * len * t + py * amp * sign),
+    });
   }
-  ctrls.push(end);
-  // Smooth-ish — straight between control points.
+  ctrls.push(b);
   const out = [];
   for (let i = 0; i < ctrls.length - 1; i++) {
-    const a = ctrls[i], b = ctrls[i + 1];
-    const len = Math.hypot(b.x - a.x, b.y - a.y);
-    const steps = Math.max(2, Math.floor(len / 2));
-    for (let j = 1; j <= steps; j++) {
-      const t = j / steps;
-      out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
-    }
+    const line = bresenham(ctrls[i].gx, ctrls[i].gy, ctrls[i + 1].gx, ctrls[i + 1].gy);
+    for (const c of (i === 0 ? line : line.slice(1))) out.push(c);
   }
-  return out;
+  return makeConnected(out);
 }
 connectorSwitchback.kind = 'switchback';
 
-// 9. MANHATTAN — axis-aligned right-angle steps from start to end.
-export function connectorManhattan(start, end, bounds, rng) {
-  const dx = end.x - start.x, dy = end.y - start.y;
-  const steps = 2 + Math.floor(rng() * 2);   // 2 or 3 zig-zags
+// 10. MANHATTAN — only 90° turns, axis-aligned stairs.
+export function connectorManhattan(a, b, rng) {
+  const dx = b.gx - a.gx;
+  const dy = b.gy - a.gy;
+  const steps = 2 + Math.floor(rng() * 2);
   const stepX = dx / steps;
   const stepY = dy / steps;
-  const ctrls = [start];
-  let cur = { ...start };
+  const ctrls = [{ gx: a.gx, gy: a.gy }];
+  let curGx = a.gx, curGy = a.gy;
+  const hFirst = rng() < 0.5;
   for (let i = 0; i < steps; i++) {
-    if (i % 2 === 0) {
-      cur = clampToBounds({ x: cur.x + stepX, y: cur.y },             bounds);
-      ctrls.push({ ...cur });
-      cur = clampToBounds({ x: cur.x,         y: cur.y + stepY },     bounds);
-      ctrls.push({ ...cur });
+    if ((i + (hFirst ? 0 : 1)) % 2 === 0) {
+      curGx = Math.round(a.gx + stepX * (i + 1));
+      ctrls.push({ gx: curGx, gy: curGy });
+      curGy = Math.round(a.gy + stepY * (i + 1));
+      ctrls.push({ gx: curGx, gy: curGy });
     } else {
-      cur = clampToBounds({ x: cur.x,         y: cur.y + stepY },     bounds);
-      ctrls.push({ ...cur });
-      cur = clampToBounds({ x: cur.x + stepX, y: cur.y },             bounds);
-      ctrls.push({ ...cur });
+      curGy = Math.round(a.gy + stepY * (i + 1));
+      ctrls.push({ gx: curGx, gy: curGy });
+      curGx = Math.round(a.gx + stepX * (i + 1));
+      ctrls.push({ gx: curGx, gy: curGy });
     }
   }
-  ctrls[ctrls.length - 1] = end;
-  // Subdivide and slightly round the corners so the placer doesn't see
-  // exact-90° transitions that would force a sharp single-cell turn.
+  ctrls[ctrls.length - 1] = { gx: b.gx, gy: b.gy };
   const out = [];
   for (let i = 0; i < ctrls.length - 1; i++) {
-    const a = ctrls[i], b = ctrls[i + 1];
-    const len = Math.hypot(b.x - a.x, b.y - a.y);
-    const N = Math.max(2, Math.floor(len / 2));
-    for (let j = 1; j <= N; j++) {
-      const t = j / N;
-      out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
-    }
+    const line = bresenham(ctrls[i].gx, ctrls[i].gy, ctrls[i + 1].gx, ctrls[i + 1].gy);
+    for (const c of (i === 0 ? line : line.slice(1))) out.push(c);
   }
-  return out;
+  return makeConnected(out);
 }
 connectorManhattan.kind = 'manhattan';
 
-// 10. MAZE-COLLAPSED — generate a small maze inside the room's bounding
-//     box on a 6m sub-grid, depth-first search; then collapse the longest
-//     simple path from start-cell to end-cell into a polyline.
-export function connectorMazeCollapsed(start, end, bounds, rng) {
-  const CELL = 6;
-  const W = Math.max(2, Math.floor((bounds.maxX - bounds.minX) / CELL));
-  const H = Math.max(2, Math.floor((bounds.maxY - bounds.minY) / CELL));
-  const ox = bounds.minX;
-  const oy = bounds.minY;
-
-  const cellAt = (gx, gy) => `${gx},${gy}`;
-  const startGX = Math.max(0, Math.min(W - 1, Math.floor((start.x - ox) / CELL)));
-  const startGY = Math.max(0, Math.min(H - 1, Math.floor((start.y - oy) / CELL)));
-  const endGX   = Math.max(0, Math.min(W - 1, Math.floor((end.x   - ox) / CELL)));
-  const endGY   = Math.max(0, Math.min(H - 1, Math.floor((end.y   - oy) / CELL)));
-
-  // DFS to find a SIMPLE path from start cell to end cell, exploring
-  // neighbours in randomized order. Bounded by maxBacktracks to keep it cheap.
+// 11. MAZE — random DFS from a to b inside a rectangular bounding region.
+//     Walks the grid one cell at a time, picking unvisited 4-neighbours in
+//     random order, backtracking when stuck. The resulting cell list is
+//     guaranteed 4-connected by construction.
+export function connectorMazeDFS(a, b, rng) {
+  // Bounding box for the walk: expand the a–b AABB by a few cells on each side.
+  const minX = Math.min(a.gx, b.gx) - 3;
+  const maxX = Math.max(a.gx, b.gx) + 3;
+  const minY = Math.min(a.gy, b.gy) - 3;
+  const maxY = Math.max(a.gy, b.gy) + 3;
   const visited = new Set();
-  const stack = [[startGX, startGY]];
   const path = [];
+  const stack = [{ gx: a.gx, gy: a.gy }];
   const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
-  let safety = W * H * 4;
+  let safety = (maxX - minX + 1) * (maxY - minY + 1) * 4;
+  let found = false;
   while (stack.length && safety-- > 0) {
-    const [gx, gy] = stack[stack.length - 1];
-    const key = cellAt(gx, gy);
-    if (!visited.has(key)) {
-      visited.add(key);
-      path.push([gx, gy]);
+    const top = stack[stack.length - 1];
+    const k = key(top.gx, top.gy);
+    if (!visited.has(k)) {
+      visited.add(k);
+      path.push({ gx: top.gx, gy: top.gy });
     }
-    if (gx === endGX && gy === endGY) break;
-    // Randomize neighbour order.
+    if (top.gx === b.gx && top.gy === b.gy) { found = true; break; }
     const order = dirs.slice().sort(() => rng() - 0.5);
     let advanced = false;
     for (const [dx, dy] of order) {
-      const nx = gx + dx, ny = gy + dy;
-      if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
-      if (visited.has(cellAt(nx, ny))) continue;
-      stack.push([nx, ny]);
+      const nx = top.gx + dx, ny = top.gy + dy;
+      if (nx < minX || nx > maxX || ny < minY || ny > maxY) continue;
+      if (visited.has(key(nx, ny))) continue;
+      stack.push({ gx: nx, gy: ny });
       advanced = true;
       break;
     }
     if (!advanced) {
       stack.pop();
-      // Backtrack the path too.
-      if (path.length > 1 && path[path.length - 1][0] === gx && path[path.length - 1][1] === gy) {
+      if (path.length > 1 && path[path.length - 1].gx === top.gx && path[path.length - 1].gy === top.gy) {
         path.pop();
       }
     }
   }
-  if (path.length < 1) return connectorDirect(start, end, bounds, rng);
-
-  // Build a polyline through cell centres, snapping start/end exactly.
-  const pts = [];
-  const N = path.length;
-  for (let i = 0; i < N; i++) {
-    const cx = ox + (path[i][0] + 0.5) * CELL;
-    const cy = oy + (path[i][1] + 0.5) * CELL;
-    pts.push({ x: cx, y: cy });
+  if (!found || path.length < 2) {
+    return connectorDirect(a, b, rng);
   }
-  // Replace last point with the actual end.
-  pts[pts.length - 1] = end;
-  // Insert intermediate points along each segment so tiles fill in nicely.
-  const out = [];
-  let prev = start;
-  for (const p of pts) {
-    const len = Math.hypot(p.x - prev.x, p.y - prev.y);
-    const steps = Math.max(2, Math.floor(len / 2.5));
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      out.push({ x: prev.x + (p.x - prev.x) * t, y: prev.y + (p.y - prev.y) * t });
-    }
-    prev = p;
-  }
-  return out;
+  return makeConnected(path);
 }
-connectorMazeCollapsed.kind = 'maze';
+connectorMazeDFS.kind = 'maze';
 
-// 11. LAZY ARC — wide, gentle bezier (smaller offset than the sweep).
-export function connectorLazyArc(start, end, bounds, rng) {
-  const f = frame(start, end);
-  const off = (rng() < 0.5 ? 1 : -1) * f.len * rfloat(rng, 0.10, 0.18);
-  const c1 = { x: start.x + f.ux * f.len * 0.4 + f.px * off, y: start.y + f.uy * f.len * 0.4 + f.py * off };
-  const c2 = { x: start.x + f.ux * f.len * 0.6 + f.px * off, y: start.y + f.uy * f.len * 0.6 + f.py * off };
-  return bezierPoints(start, c1, c2, end, Math.max(12, Math.floor(f.len / 2.2)));
-}
-connectorLazyArc.kind = 'lazy_arc';
-
-// 12. CHICANE — quick S-curve through the centre.
-export function connectorChicane(start, end, bounds, rng) {
-  const f = frame(start, end);
-  const amp = Math.min(f.len * 0.18, 12);
+// 12. CHICANE — quick S-curve through the middle.
+export function connectorChicane(a, b, rng) {
+  const dx = b.gx - a.gx, dy = b.gy - a.gy;
+  const len = Math.hypot(dx, dy) || 1;
+  const fx = dx / len, fy = dy / len;
+  const px = -fy, py = fx;
+  const amp = Math.min(len * 0.22, 5);
   const sign = rng() < 0.5 ? 1 : -1;
-  const m1 = clampToBounds({ x: start.x + f.ux * f.len * 0.25 + f.px * amp * sign, y: start.y + f.uy * f.len * 0.25 + f.py * amp * sign }, bounds);
-  const m2 = clampToBounds({ x: start.x + f.ux * f.len * 0.5,                     y: start.y + f.uy * f.len * 0.5 }, bounds);
-  const m3 = clampToBounds({ x: start.x + f.ux * f.len * 0.75 - f.px * amp * sign, y: start.y + f.uy * f.len * 0.75 - f.py * amp * sign }, bounds);
+  const m1 = { gx: Math.round(a.gx + fx * len * 0.25 + px * amp * sign), gy: Math.round(a.gy + fy * len * 0.25 + py * amp * sign) };
+  const m2 = { gx: Math.round(a.gx + fx * len * 0.50),                   gy: Math.round(a.gy + fy * len * 0.50) };
+  const m3 = { gx: Math.round(a.gx + fx * len * 0.75 - px * amp * sign), gy: Math.round(a.gy + fy * len * 0.75 - py * amp * sign) };
   const out = [];
-  let prev = start;
-  for (const p of [m1, m2, m3, end]) {
-    const len = Math.hypot(p.x - prev.x, p.y - prev.y);
-    const N = Math.max(4, Math.floor(len / 1.8));
-    for (let i = 1; i <= N; i++) {
-      const t = i / N;
-      out.push({ x: prev.x + (p.x - prev.x) * t, y: prev.y + (p.y - prev.y) * t });
-    }
-    prev = p;
+  let prev = a;
+  for (const cur of [m1, m2, m3, b]) {
+    const line = bresenham(prev.gx, prev.gy, cur.gx, cur.gy);
+    for (const c of (prev === a ? line : line.slice(1))) out.push(c);
+    prev = cur;
   }
-  return out;
+  return makeConnected(out);
 }
 connectorChicane.kind = 'chicane';
 
-// ---------- Registry ----------
+// ---- Registry ------------------------------------------------------------
 
 export const CONNECTORS = [
   connectorDirect,
   connectorBezierSweep,
+  connectorLazyArc,
   connectorWinding,
   connectorMeandering,
   connectorDogleg,
@@ -364,41 +365,37 @@ export const CONNECTORS = [
   connectorWave,
   connectorSwitchback,
   connectorManhattan,
-  connectorMazeCollapsed,
-  connectorLazyArc,
+  connectorMazeDFS,
   connectorChicane,
 ];
 
-export function pickConnector(rng, segLen) {
-  // Length-aware weighting: short segments favour direct / chicane / dogleg;
-  // long ones favour sweepers / mazes / winding.
+export function pickConnector(rng, segCells) {
   const r = rng();
-  if (segLen < 25) {
+  if (segCells < 8) {
     if (r < 0.35) return connectorDirect;
     if (r < 0.55) return connectorChicane;
     if (r < 0.75) return connectorDogleg;
     if (r < 0.90) return connectorLazyArc;
     return connectorDualStraight;
   }
-  if (segLen < 55) {
-    if (r < 0.18) return connectorBezierSweep;
-    if (r < 0.34) return connectorWave;
-    if (r < 0.46) return connectorChicane;
-    if (r < 0.58) return connectorDogleg;
-    if (r < 0.70) return connectorWinding;
-    if (r < 0.80) return connectorSwitchback;
-    if (r < 0.88) return connectorMeandering;
-    if (r < 0.94) return connectorManhattan;
+  if (segCells < 18) {
+    if (r < 0.16) return connectorBezierSweep;
+    if (r < 0.30) return connectorWave;
+    if (r < 0.42) return connectorChicane;
+    if (r < 0.54) return connectorDogleg;
+    if (r < 0.66) return connectorWinding;
+    if (r < 0.76) return connectorSwitchback;
+    if (r < 0.84) return connectorMeandering;
+    if (r < 0.92) return connectorManhattan;
     return connectorDualStraight;
   }
-  // Long
+  // Long segments — sweepers + mazes + winding patterns shine.
   if (r < 0.22) return connectorBezierSweep;
   if (r < 0.38) return connectorMeandering;
   if (r < 0.52) return connectorWinding;
-  if (r < 0.64) return connectorMazeCollapsed;
-  if (r < 0.74) return connectorWave;
-  if (r < 0.82) return connectorSwitchback;
-  if (r < 0.90) return connectorManhattan;
-  if (r < 0.96) return connectorLazyArc;
-  return connectorDualStraight;
+  if (r < 0.66) return connectorMazeDFS;
+  if (r < 0.76) return connectorWave;
+  if (r < 0.84) return connectorSwitchback;
+  if (r < 0.92) return connectorManhattan;
+  return connectorLazyArc;
 }
