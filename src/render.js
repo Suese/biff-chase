@@ -392,14 +392,17 @@ export class RallyScene {
   drawMinimap(state, myId) {
     const g = this.minimapGfx;
     g.clear();
-    if (!state.track) return;
+    // Snapshots don't always carry track data (we strip it after the first
+    // send for bandwidth). Read from the locally-built track instead.
+    const track = this._currentTrack;
+    if (!track) return;
     const mm = document.getElementById('minimap');
     if (!mm) return;
     const rect = mm.getBoundingClientRect();
     const ox = rect.left;
     const oy = rect.top;
     const w = rect.width, h = rect.height;
-    const b = state.track.bounds;
+    const b = track.bounds;
     const bw = b.maxX - b.minX;
     const bh = b.maxY - b.minY;
     const pad = 8;
@@ -408,8 +411,8 @@ export class RallyScene {
     const dy = oy + (h - bh * scale) / 2 - b.minY * scale;
 
     // Track outline
-    const outer = state.track.outer;
-    const inner = state.track.inner;
+    const outer = track.outer;
+    const inner = track.inner;
     g.beginPath();
     g.moveTo(dx + outer[0].x * scale, dy + outer[0].y * scale);
     for (let i = 1; i < outer.length; i++) g.lineTo(dx + outer[i].x * scale, dy + outer[i].y * scale);

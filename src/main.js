@@ -231,6 +231,12 @@ function applyState(state) {
   prevPhase = state.phase;
   lastState = state;
 
+  // Once we leave the lobby, make sure no DOM input keeps focus — otherwise
+  // WASD never reaches the game.
+  if (phaseChanged && state.phase !== 'lobby' && document.activeElement && document.activeElement.tagName !== 'BODY') {
+    try { document.activeElement.blur(); } catch {}
+  }
+
   // Rebuild the scene if the track changed. State sometimes carries only the
   // seed (bandwidth optimisation) — in that case the receiver should already
   // have the full track from an earlier snapshot.

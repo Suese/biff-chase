@@ -28,10 +28,26 @@ export function createInputTracker(onChange, onUseItem) {
     if (dirty) emit();
   };
 
+  // Only block driving keys when the user is actively typing in a VISIBLE
+  // text input. The lobby's name-input keeps focus across the show/hide of
+  // overlays in some browsers — checking visibility prevents that ghost focus
+  // from killing in-race input.
+  const focusedInVisibleInput = () => {
+    const el = document.activeElement;
+    if (!el || el.tagName !== 'INPUT') return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return false;
+    let p = el;
+    while (p && p !== document.body) {
+      const cs = getComputedStyle(p);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+      p = p.parentElement;
+    }
+    return true;
+  };
+
   window.addEventListener('keydown', (e) => {
-    // Don't capture when focused in an input
-    if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
-    // Use-item is a one-shot — fire on first down
+    if (focusedInVisibleInput()) return;
     if (KEYS.useItem.has(e.key)) {
       if (!heldKeys.has(e.key)) onUseItem?.();
     }
