@@ -35,23 +35,22 @@ export const UPGRADES = {
 };
 
 // Resolve car stats from base + upgrade levels. All physics tuning lives here.
+// Scale reference: car length 56 px ≈ 4.5 m → 1 m ≈ 12.4 px.
+// maxSpeed 720 px/sec ≈ 58 m/sec ≈ 210 km/h — realistic arcade top speed.
+
 export function computeStats(upgrades = {}) {
   const eng = upgrades.engine || 0;
   const tir = upgrades.tires  || 0;
   const arm = upgrades.armor  || 0;
   const fue = upgrades.fuel   || 0;
   return {
-    // Stock car ≈ 4× the prior baseline. Walls are now genuinely dangerous.
-    maxSpeed:   1700 + eng * 180,
-    accel:      3000 + eng * 480,
-    brake:      2600 + eng * 120,
-    reverse:     520 + eng * 60,
-    // Aggressively low grip + brisk turn rate so the car is twitchy from the
-    // first race. Upgrade tires to tame it.
-    grip:       0.55 + tir * 0.10,    // base grip when going straight; drift erodes it
+    maxSpeed:   720 + eng * 90,
+    accel:     1200 + eng * 220,
+    brake:     1500 + eng * 80,
+    reverse:    340 + eng * 40,
+    grip:       0.55 + tir * 0.10,
     turnSpeed:  3.6 + tir * 0.40,
-    armor:      400 + arm * 140,      // ~4× tougher; survives several scrapes
-
+    armor:      400 + arm * 140,
     nitroMul:   1.0 + fue * 0.25,
     nitroBoost: 1.45 + eng * 0.05,
   };

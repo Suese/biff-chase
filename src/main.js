@@ -471,8 +471,8 @@ onGameTick((dt) => {
   // so the player sees more of the road ahead.
   const myInterp = interpCars.get(myId);
   const camSpeed = myInterp ? Math.hypot(myInterp.vx, myInterp.vy) : 0;
-  const speedNorm = Math.min(1, camSpeed / 1700);
-  scene.setZoom(1.2 - speedNorm * 0.45);   // 1.2 at rest → 0.75 at full tilt
+  const speedNorm = Math.min(1, camSpeed / 720);
+  scene.setZoom(1.25 - speedNorm * 0.4);   // 1.25 at rest → 0.85 at full tilt
 
   // Draw cars + pickups + hazards using interpolated state
   const dispState = lastState;
@@ -489,10 +489,10 @@ onGameTick((dt) => {
   // Minimap
   scene.drawMinimap({ ...dispState, cars: displayCars }, myId);
 
-  // Speedo (my car)
+  // Speedo (my car). Pixel→km/h: 1m≈12.4px → km/h ≈ px/sec × 0.29.
   const me = displayCars.find(c => c.id === myId);
   if (me) {
-    const kmh = Math.hypot(me.vx, me.vy) * 0.36; // tuned so top speed lands roughly under 200
+    const kmh = Math.hypot(me.vx, me.vy) * 0.29;
     ui.renderSpeed(kmh);
     sfx.setEngine(kmh, me.boost > 0);
   }
