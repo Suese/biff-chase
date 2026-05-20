@@ -11,13 +11,12 @@ import { mulberry32, rfloat } from './rng.js';
 export function generateTrack(seed) {
   const rng = mulberry32(seed >>> 0);
 
-  // Polygon-based centerline. Vertices live on a jittered circle — but with
-  // only one Chaikin smoothing pass each corner stays sharp, giving the
-  // angular Death Rally feel without the self-intersection risk of a
-  // grid-snapped layout.
-  const N = 16 + Math.floor(rng() * 5);    // 16-20 vertices
-  const baseR = 900;
-  const radJitter = 380;
+  // Polygon-based centerline. All distances in METRES.
+  //   baseR ≈ 75m radius — roughly a 150m × 150m track footprint.
+  //   radJitter ≈ ±25m for shape variety.
+  const N = 16 + Math.floor(rng() * 5);
+  const baseR = 75;
+  const radJitter = 25;
   const ctrl = [];
   for (let i = 0; i < N; i++) {
     const a = (i / N) * Math.PI * 2 + rfloat(rng, -0.08, 0.08);
@@ -28,27 +27,23 @@ export function generateTrack(seed) {
   // One Chaikin pass — barely rounds the polygon corners, keeps the angles.
   let pts = chaikinClosed(ctrl);
 
-  // Fine resampling means each turn becomes many small bends — the offset
-  // polyline (used by the renderer to build the road ring) is much smoother
-  // and the miter-limit clamp almost never fires.
-  pts = resampleByArc(pts, 36);
+  // Fine resampling — 3m between centerline vertices. Many small bends mean
+  // the offset polyline used to build the road ring rarely hits the miter
+  // clamp, so the edges are smooth.
+  pts = resampleByArc(pts, 3);
 
-  // Per-vertex track width with smooth variation. Base is wide enough that a
-  // 4-wide starting grid (≈ 180 px including car widths + gaps) fits in any
-  // section with margin to spare. Variation adds character to the track shape.
-  const widthBase = 320;
-  const widthVar  = 60;
+  // Track width — 12m base, ±2m variation. Wide enough for a 4-wide grid
+  // (cars 1.8m wide, gaps 1.7m → 14m needed; we force ≥14m near the start).
+  const widthBase = 12;
+  const widthVar  = 2;
   const phase     = rng() * Math.PI * 2;
   const widthFreq = 3 + Math.floor(rng() * 3);
   const widths = pts.map((_, i) => {
     const t = (i / pts.length) * Math.PI * 2;
     return widthBase + Math.sin(t * widthFreq + phase) * widthVar;
   });
-  // Force generous width near the start/finish so the grid is always inside
-  // the track regardless of where the noise dipped. Indices 0 and the last
-  // few cover the start point + the backward grid rows.
-  const startMin = 280;
-  const startRange = 6;       // ~300 px back along the centerline
+  const startMin = 14;
+  const startRange = 10;
   for (let i = 0; i < startRange; i++) {
     const idxBack = (pts.length - i) % pts.length;
     widths[i] = Math.max(widths[i], startMin);
@@ -119,10 +114,9 @@ export function generateTrack(seed) {
     });
   }
 
-  // Pickup slots — very sparse on the new fast tracks. A handful of pickups
-  // per loop, alternating sides.
+  // Pickup slots — every ~75m of track (5 or 6 pickups per loop).
   const pickupSlots = [];
-  const pickupStep = 130;     // tuned for the finer-resampled centerline
+  const pickupStep = 25;
   for (let i = 0; i < pts.length; i += pickupStep) {
     const p = pts[i];
     const prev = pts[(i - 1 + pts.length) % pts.length];
@@ -136,7 +130,7 @@ export function generateTrack(seed) {
     pickupSlots.push({ x: p.x + nx * w, y: p.y + ny * w });
   }
 
-  // World bounds for camera + minimap — covers every tile corner.
+  // World bounds (in metres) — covers every tile corner.
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const t of tiles) {
     for (const c of [t.al, t.ar, t.bl, t.br]) {
@@ -146,7 +140,7 @@ export function generateTrack(seed) {
       if (c.y > maxY) maxY = c.y;
     }
   }
-  const pad = 120;
+  const pad = 12;     // 12 m of room around the track
   const bounds = {
     minX: minX - pad, minY: minY - pad,
     maxX: maxX + pad, maxY: maxY + pad,
@@ -207,17 +201,16 @@ function normalize(v) {
   return { x: v.x / l, y: v.y / l };
 }
 
-// Grid 4-wide × N-deep, all behind the start line. Lateral span is 180 px
-// (4 columns at 60 px spacing), which fits inside the guaranteed start-area
-// width of 280. Forward direction is the start tangent so cars face the
-// finish line.
+// Grid 4-wide × N-deep, all behind the start line. Lateral span is 10.5m
+// (4 columns at 3.5m spacing). Fits inside the guaranteed ≥14m start-area
+// width.
 export function gridSpawnPositions(track, count) {
   const { start } = track;
   const slots = [];
   const COLS = 4;
-  const colSpacing = 60;
-  const rowSpacing = 75;
-  const colOffset = -(COLS - 1) / 2;   // centre the grid: -1.5, -0.5, +0.5, +1.5
+  const colSpacing = 3.5;   // metres
+  const rowSpacing = 6;     // metres
+  const colOffset = -(COLS - 1) / 2;
   for (let i = 0; i < count; i++) {
     const colIdx = i % COLS;
     const rowIdx = Math.floor(i / COLS);

@@ -13,12 +13,18 @@
 import Matter from 'matter-js';
 import { computeStats } from './upgrades.js';
 
-export const FIXED_DT = 1 / 60;
-export const CAR_WIDTH = 32;
-export const CAR_LENGTH = 56;
-export const PICKUP_R = 22;
-export const MINE_R = 18;
-export const OIL_R = 60;
+// ---- World units are METRES, period. No more pixel-scale fudge factors.
+// A car is 4.5 m × 1.8 m, a stock top speed is ~33 m/s (120 km/h), the
+// procedurally generated track is roughly 75 m in radius with a ~12 m wide
+// surface. Three.js world space, Matter.js bodies, and everything that
+// gets serialized over the wire is the same scale.
+
+export const FIXED_DT  = 1 / 60;
+export const CAR_LENGTH = 4.5;
+export const CAR_WIDTH  = 1.8;
+export const PICKUP_R   = 1.6;    // how close you have to be to grab a pickup
+export const MINE_R     = 1.4;
+export const OIL_R      = 5.0;
 
 // ---------- World ----------
 
@@ -35,9 +41,7 @@ export function createWorld() {
 
 export function buildTrackBodies(world, track) {
   const bodies = [];
-  // Inner wall as a closed loop of small segments. Each segment is a thin
-  // rectangle rotated to match the edge.
-  const wallThickness = 14;
+  const wallThickness = 0.8;   // 0.8 m thick barrier
   const addWallLoop = (loop) => {
     for (let i = 0; i < loop.length; i++) {
       const a = loop[i];
@@ -48,15 +52,14 @@ export function buildTrackBodies(world, track) {
       const dy = b.y - a.y;
       const len = Math.hypot(dx, dy);
       const angle = Math.atan2(dy, dx);
-      const seg = Matter.Bodies.rectangle(mx, my, len + 2, wallThickness, {
+      const seg = Matter.Bodies.rectangle(mx, my, len + 0.1, wallThickness, {
         isStatic: true,
         angle,
-        // Frictionless walls — cars slide along them instead of catching.
         friction: 0,
         frictionStatic: 0,
         restitution: 0.05,
         label: 'wall',
-        slop: 0.02,
+        slop: 0.005,
       });
       bodies.push(seg);
     }
@@ -72,15 +75,17 @@ export function buildTrackBodies(world, track) {
 export function createCarBody(x, y, angle, ownerId, stats) {
   const body = Matter.Bodies.rectangle(x, y, CAR_WIDTH, CAR_LENGTH, {
     angle,
-    density: 0.002,
+    // Mass ≈ density × area = 0.4 × (4.5 × 1.8) = 3.24 — reasonable in
+    // arbitrary mass units. Forces are user-applied so absolute mass is
+    // mostly aesthetic.
+    density: 0.4,
     frictionAir: 0,
-    // Frictionless contacts so the car glides along walls (we still get the
-    // collision response — just no sticky friction killing forward motion).
     friction: 0,
     frictionStatic: 0,
     restitution: 0.05,
     label: 'car',
-    chamfer: { radius: 6 },
+    chamfer: { radius: 0.25 },
+    slop: 0.005,
   });
   body.ownerId = ownerId;
   body.stats = stats;
@@ -214,7 +219,7 @@ export function stepCar(body, dt) {
 // the outward velocity component. Returns null when no constraint fired, or
 // a small descriptor with the contact info for grind/bump effects.
 
-const CAR_HALF = CAR_WIDTH / 2;
+const CAR_HALF = CAR_WIDTH / 2;     // 0.9 m
 
 export function clampToTrack(body, track) {
   if (!body.alive || !track || !track.tiles?.length) return null;

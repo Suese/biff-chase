@@ -350,12 +350,12 @@ export class GameRoom {
     } else if (useId === 'repair') {
       car.health = car.armor;
     } else if (useId === 'mine' || useId === 'oil' || useId === 'spikes') {
-      // Drop just behind the car
+      // Drop ~1 car-length behind the rear bumper.
       const a = car.angle;
       const fx = Math.cos(a), fy = Math.sin(a);
       const id = ++this.hazardSeq;
-      const x = car.position.x - fx * (CAR_LENGTH * 0.7);
-      const y = car.position.y - fy * (CAR_LENGTH * 0.7);
+      const x = car.position.x - fx * (CAR_LENGTH * 1.2);
+      const y = car.position.y - fy * (CAR_LENGTH * 1.2);
       const ttl = useId === 'oil' ? OIL_TTL_S : MINE_TTL_S;
       const ent = makeHazardEntity({ id, kind: useId, ownerId: playerId, x, y, ttl });
       this.ecs.addEntity(ent);
@@ -417,36 +417,35 @@ export class GameRoom {
     // 2. Run Matter physics step
     Matter.Engine.update(this.engine, dt * 1000);
 
-    // 2.5. CSG track containment — replace per-segment wall bodies. For each
-    // car, find the nearest centerline segment, clamp it inside the road
-    // surface, and emit grind/bump effects when we had to push it back.
+    // 2.5. CSG track containment — push cars back into the road and emit
+    // grind/bump effects. Thresholds are all in m/s.
     eachCar(this.ecs, (e) => {
       const body = getRigidBody(e);
       const hit = clampToTrack(body, this.track);
       if (!hit) return;
       const now = Date.now();
       const lastGrind = body._lastGrindMs || 0;
-      if (hit.speedSec > 50 && now - lastGrind > 80) {
+      if (hit.speedSec > 4 && now - lastGrind > 80) {
         body._lastGrindMs = now;
         this.emitEvent({
           type: 'grind',
           playerId: body.ownerId,
           x: hit.contactX, y: hit.contactY,
-          intensity: Math.min(1, hit.speedSec / 280),
+          intensity: Math.min(1, hit.speedSec / 22),
         });
       }
-      // Bumps + damage when the car arrives fast and there's real penetration.
-      if (hit.speedSec > 200 && hit.overhang > 4) {
+      // Damage scales with speed; only fires on hard wall contacts.
+      if (hit.speedSec > 16 && hit.overhang > 0.3) {
         const lastBump = body._lastBumpMs || 0;
         if (now - lastBump > 250) {
           body._lastBumpMs = now;
-          const dmg = Math.min(22, hit.speedSec * 0.06);
+          const dmg = Math.min(30, (hit.speedSec - 10) * 0.7);
           dealDamage(body, dmg);
           this.emitEvent({
             type: 'bump',
             playerId: body.ownerId,
             x: hit.contactX, y: hit.contactY,
-            intensity: Math.min(1, hit.speedSec / 320),
+            intensity: Math.min(1, hit.speedSec / 26),
           });
         }
       }
@@ -471,7 +470,8 @@ export class GameRoom {
         if (!car?.alive || p.taken) return;
         const dx = car.position.x - p.x;
         const dy = car.position.y - p.y;
-        if (dx * dx + dy * dy < (PICKUP_R + 18) * (PICKUP_R + 18)) {
+        const r = PICKUP_R + CAR_LENGTH * 0.5;     // car-front to slot centre
+        if (dx * dx + dy * dy < r * r) {
           this.grantPickup(car.ownerId, p.kind);
           p.taken = true;
           p.respawnAtMs = now + PICKUP_RESPAWN_MS;
@@ -493,11 +493,11 @@ export class GameRoom {
         if (consumed) return;
         const car = getRigidBody(carEnt);
         if (!car?.alive) return;
-        // Owner gets a 0.7s grace period so they don't immediately drive over their own drop
         if (car.ownerId === h.ownerId && h.ttl > (h.kind === 'oil' ? OIL_TTL_S : MINE_TTL_S) - 0.7) return;
         const dx = car.position.x - h.x;
         const dy = car.position.y - h.y;
-        if (dx * dx + dy * dy < (radius + 16) * (radius + 16)) {
+        const r = radius + CAR_WIDTH * 0.6;
+        if (dx * dx + dy * dy < r * r) {
           this.triggerHazard(car, h);
           if (h.kind !== 'oil') {
             expiredHazards.push({ e, id: h.id });
@@ -558,17 +558,19 @@ export class GameRoom {
 
   triggerHazard(car, h) {
     if (h.kind === 'mine') {
-      const dmg = 60;
-      const exploded = dealDamage(car, dmg);
-      // Knock the car sideways
+      const exploded = dealDamage(car, 60);
+      // Knock the car sideways — give it a velocity kick away from the blast.
       const ax = car.position.x - h.x;
       const ay = car.position.y - h.y;
       const al = Math.hypot(ax, ay) || 1;
-      Matter.Body.applyForce(car, car.position, { x: ax / al * 0.5, y: ay / al * 0.5 });
+      const kick = 8;        // m/s impulse
+      Matter.Body.setVelocity(car, {
+        x: car.velocity.x + (ax / al) * kick * FIXED_DT,
+        y: car.velocity.y + (ay / al) * kick * FIXED_DT,
+      });
       this.emitEvent({ type: 'mine_hit', playerId: car.ownerId, x: h.x, y: h.y, exploded });
       if (exploded) this.maybeRespawn(car);
     } else if (h.kind === 'spikes') {
-      // Hard slow + a chunk of damage
       Matter.Body.setVelocity(car, { x: car.velocity.x * 0.3, y: car.velocity.y * 0.3 });
       const exploded = dealDamage(car, 25);
       this.emitEvent({ type: 'spikes_hit', playerId: car.ownerId, x: h.x, y: h.y, exploded });

@@ -104,28 +104,27 @@ export class RallyScene {
     this.rootEl.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.scene.fog = new THREE.Fog(0x0a0e16, 1400, 3600);
+    // Fog in metres: starts at ~110m out, vanishes by 300m.
+    this.scene.fog = new THREE.Fog(0x0a0e16, 110, 300);
 
-    this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 1, 6000);
-    this.camera.position.set(0, 700, 200);
+    this.camera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.5, 800);
+    this.camera.position.set(0, 60, 16);
     this.camera.lookAt(0, 0, 0);
 
-    // Lighting — PBR units (intensity 3+ for directional/hemisphere).
+    // PBR-style lighting (intensities tuned for ACES tone mapping).
     const sun = new THREE.DirectionalLight(0xfff0d8, 3.4);
-    sun.position.set(800, 1400, 600);
+    sun.position.set(80, 140, 60);
     this.scene.add(sun);
-    // Cool ambient from above, warmer fill from below — turns concrete walls
-    // from flat-grey to genuine 3D.
     const hemi = new THREE.HemisphereLight(0x88a0c8, 0x1a1410, 1.5);
     this.scene.add(hemi);
 
-    // Ground — dark slab with a subtle PBR feel.
+    // Ground — dark slab beneath the road.
     this.ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(12000, 12000),
+      new THREE.PlaneGeometry(800, 800),
       new THREE.MeshStandardMaterial({ color: 0x0f131c, roughness: 0.95, metalness: 0.0 }),
     );
     this.ground.rotation.x = -Math.PI / 2;
-    this.ground.position.y = -1;
+    this.ground.position.y = -0.05;
     this.scene.add(this.ground);
 
     this.trackGroup = new THREE.Group();
@@ -173,16 +172,17 @@ export class RallyScene {
     }
     this.cameraZoom += (this.targetZoom - this.cameraZoom) * (1 - Math.pow(0.001, dt));
 
-    // Tilted top-down — camera high above with a +Z offset for ~15° tilt.
-    // Doubled the distances vs the previous build so the world feels roomier.
-    const height  = 760 / this.cameraZoom;
-    const offsetZ = 200 / this.cameraZoom;
+    // Tilted top-down — camera ~60m above with a 16m +Z offset (≈15° tilt
+    // from vertical). The lookAt sits at the car's vertical centre so the
+    // car visually sits at the screen centre.
+    const height  = 60 / this.cameraZoom;
+    const offsetZ = 16 / this.cameraZoom;
     this.camera.position.set(
       this.cameraPos.x,
       height,
       this.cameraPos.z + offsetZ,
     );
-    this.camera.lookAt(this.cameraPos.x, 0, this.cameraPos.z);
+    this.camera.lookAt(this.cameraPos.x, 0.8, this.cameraPos.z);
 
     // ---- Particles (sparks): arc with gravity, fade out.
     for (let i = this.particles.length - 1; i >= 0; i--) {
@@ -199,17 +199,18 @@ export class RallyScene {
       p.mesh.position.z += p.vy * dt;
       p.mesh.position.y += p.vyW * dt;
       p.vx *= 0.92; p.vy *= 0.92;
-      p.vyW -= 380 * dt;
+      p.vyW -= 14 * dt;       // gravity in m/s²
       p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
     }
 
-    // ---- Per-car wheel spin (rolling at speed) — uses cached car groups.
+    // ---- Per-car wheel spin (rolling at speed). _wheelSpeed is m/s,
+    // wheel radius is 0.35m → ω = v/r rad/s.
     const tNow = performance.now() / 1000;
     for (const g of this.carMeshes.values()) {
       if (g._lastWheelSpinT == null) g._lastWheelSpinT = tNow;
       const spinDt = tNow - g._lastWheelSpinT;
       g._lastWheelSpinT = tNow;
-      const wheelDelta = (g._wheelSpeed || 0) * spinDt / 5.5; // radius ≈ 5.5
+      const wheelDelta = (g._wheelSpeed || 0) * spinDt / 0.35;
       if (g.wheels) for (const w of g.wheels) w.rotation.y += wheelDelta;
     }
 
@@ -220,8 +221,8 @@ export class RallyScene {
   // ---- Background / ground
   buildBackground(bounds) {
     if (!this.ground) return;
-    const w = bounds.maxX - bounds.minX + 1600;
-    const h = bounds.maxY - bounds.minY + 1600;
+    const w = (bounds.maxX - bounds.minX) + 200;     // 200m of skirt
+    const h = (bounds.maxY - bounds.minY) + 200;
     this.ground.geometry.dispose();
     this.ground.geometry = new THREE.PlaneGeometry(w, h);
     this.ground.position.x = (bounds.minX + bounds.maxX) / 2;
@@ -247,14 +248,13 @@ export class RallyScene {
     this._minimapRing = ring;
     const N = ring.length;
 
-    // Road — single closed strip, slight vertex-colour variation for texture.
+    // Road — single closed strip lifted a few centimetres above the ground.
     const roadPos = new Float32Array(N * 2 * 3);
     const roadCol = new Float32Array(N * 2 * 3);
     for (let i = 0; i < N; i++) {
       const l = ring[i].left, r = ring[i].right;
-      roadPos[i * 6 + 0] = l.x; roadPos[i * 6 + 1] = 0.5; roadPos[i * 6 + 2] = l.y;
-      roadPos[i * 6 + 3] = r.x; roadPos[i * 6 + 4] = 0.5; roadPos[i * 6 + 5] = r.y;
-      // Cheap procedural shading on the road.
+      roadPos[i * 6 + 0] = l.x; roadPos[i * 6 + 1] = 0.05; roadPos[i * 6 + 2] = l.y;
+      roadPos[i * 6 + 3] = r.x; roadPos[i * 6 + 4] = 0.05; roadPos[i * 6 + 5] = r.y;
       const n = (Math.sin(i * 0.43) * 0.5 + 0.5) * 0.06 + 0.34;
       roadCol[i * 6 + 0] = n;       roadCol[i * 6 + 1] = n + 0.01; roadCol[i * 6 + 2] = n + 0.04;
       roadCol[i * 6 + 3] = n + 0.02; roadCol[i * 6 + 4] = n + 0.03; roadCol[i * 6 + 5] = n + 0.06;
@@ -276,13 +276,13 @@ export class RallyScene {
     );
     this.trackGroup.add(road);
 
-    // Walls — continuous vertical ribbons. PBR concrete.
-    const wallHeight = 36;
+    // Walls — continuous concrete ribbons, ~1.2m tall.
+    const wallHeight = 1.2;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x3a4050, roughness: 0.7, metalness: 0.0 });
     this.trackGroup.add(this._buildWallRibbon(ring, 'left', wallHeight, wallMat));
     this.trackGroup.add(this._buildWallRibbon(ring, 'right', wallHeight, wallMat));
 
-    // Wall top rail — bright accent.
+    // Bright accent rail along the top of each wall.
     const rail = new THREE.MeshStandardMaterial({ color: 0xff6a3d, emissive: 0xff3a10, emissiveIntensity: 0.25, roughness: 0.4 });
     this.trackGroup.add(this._buildRailRibbon(ring, 'left', wallHeight, rail));
     this.trackGroup.add(this._buildRailRibbon(ring, 'right', wallHeight, rail));
@@ -291,34 +291,35 @@ export class RallyScene {
     this.trackGroup.add(this._buildCurbRibbon(ring, 'left'));
     this.trackGroup.add(this._buildCurbRibbon(ring, 'right'));
 
-    // Centerline dashes.
+    // Centerline dashes — 2m long every ~15m of road.
     const dashes = new THREE.Group();
     const dashMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.08, roughness: 0.6 });
-    for (let i = 0; i < track.centerline.length; i += 6) {
+    for (let i = 0; i < track.centerline.length; i += 5) {
       const a = track.centerline[i];
-      const b = track.centerline[(i + 2) % track.centerline.length];
+      const b = track.centerline[(i + 1) % track.centerline.length];
       const dx = b.x - a.x, dy = b.y - a.y;
       const len = Math.hypot(dx, dy);
-      if (len < 0.5) continue;
-      const dash = new THREE.Mesh(new THREE.BoxGeometry(Math.min(len, 36), 0.4, 3), dashMat);
-      dash.position.set((a.x + b.x) / 2, 0.9, (a.y + b.y) / 2);
+      if (len < 0.1) continue;
+      const dash = new THREE.Mesh(new THREE.BoxGeometry(Math.min(len * 0.7, 2.0), 0.04, 0.2), dashMat);
+      dash.position.set((a.x + b.x) / 2, 0.07, (a.y + b.y) / 2);
       dash.rotation.y = -Math.atan2(dy, dx);
       dashes.add(dash);
     }
     this.trackGroup.add(dashes);
 
-    // Start/finish checkered band.
+    // Start/finish checkered band — 0.5m × 0.8m stripes.
     const s = track.start;
     const matLight = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 });
     const matDark  = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.7 });
-    for (let k = -6; k <= 6; k++) {
-      const px = s.x + s.nx * (k * 22);
-      const pz = s.y + s.ny * (k * 22);
+    const numStripes = Math.max(4, Math.floor(s.width / 1.5));
+    for (let k = -numStripes; k <= numStripes; k++) {
+      const px = s.x + s.nx * (k * 0.8);
+      const pz = s.y + s.ny * (k * 0.8);
       const stripe = new THREE.Mesh(
-        new THREE.BoxGeometry(20, 0.8, 22),
+        new THREE.BoxGeometry(1.6, 0.06, 0.8),
         (k % 2 === 0) ? matLight : matDark,
       );
-      stripe.position.set(px, 1.0, pz);
+      stripe.position.set(px, 0.08, pz);
       stripe.rotation.y = -Math.atan2(s.ty, s.tx);
       this.trackGroup.add(stripe);
     }
@@ -349,15 +350,15 @@ export class RallyScene {
   _buildRailRibbon(ring, side, height, mat) {
     const N = ring.length;
     const positions = new Float32Array(N * 2 * 3);
-    const inset = 2;
+    const inset = 0.15;        // 15cm wide rail
     for (let i = 0; i < N; i++) {
       const p = ring[i][side];
       const other = ring[i][side === 'left' ? 'right' : 'left'];
       const dx = other.x - p.x, dy = other.y - p.y;
       const dl = Math.hypot(dx, dy) || 1;
       const inX = dx / dl, inY = dy / dl;
-      positions[i * 6 + 0] = p.x;             positions[i * 6 + 1] = height + 1; positions[i * 6 + 2] = p.y;
-      positions[i * 6 + 3] = p.x + inX * inset; positions[i * 6 + 4] = height + 1; positions[i * 6 + 5] = p.y + inY * inset;
+      positions[i * 6 + 0] = p.x;             positions[i * 6 + 1] = height + 0.05; positions[i * 6 + 2] = p.y;
+      positions[i * 6 + 3] = p.x + inX * inset; positions[i * 6 + 4] = height + 0.05; positions[i * 6 + 5] = p.y + inY * inset;
     }
     const indices = [];
     for (let i = 0; i < N; i++) {
@@ -377,16 +378,16 @@ export class RallyScene {
     const positions = [];
     const indices = [];
     const colors = [];
-    const inset = 8;
+    const inset = 0.6;       // 60cm-wide curb strip
     for (let i = 0; i < N; i++) {
       const p = ring[i][side];
       const other = ring[i][side === 'left' ? 'right' : 'left'];
       const dx = other.x - p.x, dy = other.y - p.y;
       const dl = Math.hypot(dx, dy) || 1;
       const inX = dx / dl, inY = dy / dl;
-      positions.push(p.x + inX * inset, 1.1, p.y + inY * inset);
-      positions.push(p.x,                1.1, p.y);
-      const col = ((i % 4 < 2) ? 0xff3a3a : 0xf3f3f3);
+      positions.push(p.x + inX * inset, 0.08, p.y + inY * inset);
+      positions.push(p.x,                0.08, p.y);
+      const col = ((i % 6 < 3) ? 0xff3a3a : 0xf3f3f3);
       const r = ((col >> 16) & 0xff) / 255;
       const g = ((col >> 8)  & 0xff) / 255;
       const b = ( col        & 0xff) / 255;
@@ -405,102 +406,90 @@ export class RallyScene {
     return new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.15 }));
   }
 
-  // ---- Cars — proper 3D, painted metal, recessed wheels, rolling animation.
+  // ---- Cars — built to real-world proportions. 4.5m long, 1.8m wide.
+  // Long axis along +X (= game forward at angle 0). All dimensions in metres.
   ensureCarMesh(id, colorIdx) {
     let g = this.carMeshes.get(id);
     if (g) return g;
     g = new THREE.Group();
     const colorHex = parseInt(PLAYER_COLORS[colorIdx % PLAYER_COLORS.length].replace('#', ''), 16);
 
-    // Paint material (metallic flake) and accent metals.
-    const paint = new THREE.MeshStandardMaterial({
-      color: colorHex,
-      metalness: 0.55,
-      roughness: 0.35,
-      emissive: colorHex,
-      emissiveIntensity: 0.04,
-    });
-    const black = new THREE.MeshStandardMaterial({ color: 0x0a0c10, metalness: 0.3, roughness: 0.4 });
+    const paint  = new THREE.MeshStandardMaterial({ color: colorHex, metalness: 0.55, roughness: 0.35, emissive: colorHex, emissiveIntensity: 0.04 });
+    const black  = new THREE.MeshStandardMaterial({ color: 0x0a0c10, metalness: 0.3, roughness: 0.4 });
     const tinted = new THREE.MeshStandardMaterial({ color: 0x0c1018, metalness: 0.7, roughness: 0.1 });
 
-    // ---- Lower chassis (under-body slab the paint sits on)
-    const chassis = new THREE.Mesh(new THREE.BoxGeometry(56, 6, 32), black);
-    chassis.position.y = 4;
+    // Under-chassis slab — 4.5m × 0.2m × 1.8m, centred at y=0.35.
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.2, 1.8), black);
+    chassis.position.y = 0.35;
     g.add(chassis);
 
-    // ---- Painted body — hood / mid / trunk for a real silhouette.
-    const hood = new THREE.Mesh(new THREE.BoxGeometry(18, 7, 28), paint);
-    hood.position.set(16, 10.5, 0);
+    // Painted bodywork — three sections give a sports-car silhouette.
+    const hood  = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.5, 1.65), paint);
+    hood.position.set(1.3, 0.7, 0);
     g.add(hood);
 
-    const mid = new THREE.Mesh(new THREE.BoxGeometry(20, 10, 30), paint);
-    mid.position.set(-2, 12, 0);
+    const mid   = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.8, 1.75), paint);
+    mid.position.set(-0.2, 0.85, 0);
     g.add(mid);
 
-    const trunk = new THREE.Mesh(new THREE.BoxGeometry(12, 7, 28), paint);
-    trunk.position.set(-20, 10.5, 0);
+    const trunk = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.55, 1.65), paint);
+    trunk.position.set(-1.65, 0.72, 0);
     g.add(trunk);
 
-    // Cabin (tinted glass on top of mid).
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(22, 7, 24), tinted);
-    cabin.position.set(-2, 20, 0);
+    // Cabin (tinted greenhouse).
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.55, 1.45), tinted);
+    cabin.position.set(-0.15, 1.55, 0);
     g.add(cabin);
 
-    // Fenders (curved bumps over each wheel). Cylindrical caps angled along Z.
-    const fenderMat = paint;
-    const fenderGeom = new THREE.CylinderGeometry(7, 7, 12, 12, 1, false, 0, Math.PI);
-    const wheelPositions = [[-18, -14], [-18, 14], [18, -14], [18, 14]];
+    // Fender bumps over each wheel arch.
+    const fenderGeom = new THREE.CylinderGeometry(0.42, 0.42, 0.95, 12, 1, false, 0, Math.PI);
+    const wheelPositions = [[-1.4, -0.8], [-1.4, 0.8], [1.4, -0.8], [1.4, 0.8]];
     for (const [fx, fz] of wheelPositions) {
-      const f = new THREE.Mesh(fenderGeom, fenderMat);
+      const f = new THREE.Mesh(fenderGeom, paint);
       f.rotation.x = Math.PI / 2;
       f.rotation.y = Math.PI;
-      f.position.set(fx, 8, fz);
+      f.position.set(fx, 0.55, fz);
       g.add(f);
     }
 
-    // Headlights (bright emissive cubes).
+    // Headlights / tail lights.
     const hl = new THREE.MeshStandardMaterial({ color: 0xfff0a0, emissive: 0xfff0a0, emissiveIntensity: 1.4, metalness: 0.2, roughness: 0.4 });
-    for (const wz of [-10, 10]) {
-      const lamp = new THREE.Mesh(new THREE.BoxGeometry(2, 4, 5), hl);
-      lamp.position.set(27, 9, wz);
+    for (const wz of [-0.55, 0.55]) {
+      const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.22, 0.32), hl);
+      lamp.position.set(2.22, 0.6, wz);
       g.add(lamp);
     }
-    // Tail lights.
     const tl = new THREE.MeshStandardMaterial({ color: 0xff2030, emissive: 0xff1020, emissiveIntensity: 1.0, roughness: 0.4 });
-    for (const wz of [-12, 12]) {
-      const lamp = new THREE.Mesh(new THREE.BoxGeometry(2, 4, 5), tl);
-      lamp.position.set(-27, 9, wz);
+    for (const wz of [-0.6, 0.6]) {
+      const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.22, 0.32), tl);
+      lamp.position.set(-2.22, 0.6, wz);
       g.add(lamp);
     }
 
-    // Spoiler — small wing on two legs.
-    const spoiler = new THREE.Mesh(new THREE.BoxGeometry(4, 2, 26), black);
-    spoiler.position.set(-27, 17, 0);
+    // Rear spoiler.
+    const spoiler = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.1, 1.6), black);
+    spoiler.position.set(-2.15, 1.15, 0);
     g.add(spoiler);
-    for (const wz of [-10, 10]) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(2, 5, 2), black);
-      leg.position.set(-27, 13.5, wz);
+    for (const wz of [-0.55, 0.55]) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.32, 0.1), black);
+      leg.position.set(-2.15, 0.96, wz);
       g.add(leg);
     }
 
-    // ---- Wheels — rim + rubber. Nested groups so we can spin them around
-    // the axle without fighting Euler-order quirks.
+    // ---- Wheels — 0.35m radius rubber + brighter rim cap.
     const tireMat = new THREE.MeshStandardMaterial({ color: 0x101010, roughness: 0.85 });
-    const rimMat  = new THREE.MeshStandardMaterial({ color: 0xb0b0b0, metalness: 0.85, roughness: 0.25 });
+    const rimMat  = new THREE.MeshStandardMaterial({ color: 0xc0c0c0, metalness: 0.85, roughness: 0.25 });
     g.wheels = [];
     for (const [wx, wz] of wheelPositions) {
       const outer = new THREE.Group();
-      outer.position.set(wx, 5, wz);
-      outer.rotation.x = Math.PI / 2;   // lay the cylinder on its side
+      outer.position.set(wx, 0.35, wz);
+      outer.rotation.x = Math.PI / 2;
       const inner = new THREE.Group();
-      const tire = new THREE.Mesh(new THREE.CylinderGeometry(5.5, 5.5, 5, 14), tireMat);
-      inner.add(tire);
-      // Rim cap — narrow lighter disc, sits inside the tire.
-      const rim = new THREE.Mesh(new THREE.CylinderGeometry(3.5, 3.5, 5.2, 12), rimMat);
-      inner.add(rim);
+      inner.add(new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 0.32, 16), tireMat));
+      inner.add(new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.34, 12), rimMat));
       outer.add(inner);
       g.add(outer);
-      g.wheels.push(inner);            // spin happens on the inner around local Y
+      g.wheels.push(inner);
     }
 
     g.paintMat = paint;
@@ -540,11 +529,11 @@ export class RallyScene {
       // Cache speed so the wheel-roll tick can spin wheels at the right rate.
       g._wheelSpeed = Math.hypot(car.vx, car.vy);
 
-      // Boost trail
+      // Boost trail — sparks just behind the exhaust.
       if (car.boost > 0 && Math.random() < 0.7) {
         const ang = car.a;
         this.emitParticle(
-          car.x - Math.cos(ang) * 30, car.y - Math.sin(ang) * 30,
+          car.x - Math.cos(ang) * 2.4, car.y - Math.sin(ang) * 2.4,
           -car.vx * 0.18, -car.vy * 0.18, 0.45, 0xff7c30,
         );
       }
@@ -558,22 +547,21 @@ export class RallyScene {
     }
   }
 
-  // ---- Pickups
+  // ---- Pickups — ~1.2m floating shapes that bob 0.5m above the road.
   syncPickups(pickups, t) {
     for (const p of pickups) {
       let mesh = this.pickupMeshes.get(p.slotIndex);
       if (!mesh || mesh._kind !== p.kind) {
         if (mesh) { this.scene.remove(mesh); this._disposeNode(mesh); }
         mesh = this._buildPickupMesh(p.kind);
-        mesh.position.set(p.x, 24, p.y);
+        mesh.position.set(p.x, 1.4, p.y);
         this.scene.add(mesh);
         this.pickupMeshes.set(p.slotIndex, mesh);
       }
       mesh.visible = !p.taken;
       if (!p.taken) {
         mesh.rotation.y = t * 2.6;
-        mesh.position.y = 24 + Math.sin(t * 3 + p.slotIndex) * 4;
-        // Pulse emissive intensity for a glow effect.
+        mesh.position.y = 1.4 + Math.sin(t * 3 + p.slotIndex) * 0.25;
         if (mesh.userData.coreMat) {
           mesh.userData.coreMat.emissiveIntensity = 0.55 + Math.sin(t * 5 + p.slotIndex) * 0.35;
         }
@@ -593,13 +581,13 @@ export class RallyScene {
 
     let geom;
     switch (kind) {
-      case 'scrap':  geom = new THREE.BoxGeometry(14, 14, 14); break;
-      case 'nitro':  geom = new THREE.ConeGeometry(9, 22, 6); break;
-      case 'mine':   geom = new THREE.IcosahedronGeometry(11, 0); break;
-      case 'oil':    geom = new THREE.CylinderGeometry(10, 10, 5, 16); break;
-      case 'repair': geom = new THREE.OctahedronGeometry(12); break;
-      case 'spikes': geom = new THREE.TetrahedronGeometry(13); break;
-      default:       geom = new THREE.OctahedronGeometry(10);
+      case 'scrap':  geom = new THREE.BoxGeometry(0.9, 0.9, 0.9); break;
+      case 'nitro':  geom = new THREE.ConeGeometry(0.55, 1.2, 6); break;
+      case 'mine':   geom = new THREE.IcosahedronGeometry(0.7, 0); break;
+      case 'oil':    geom = new THREE.CylinderGeometry(0.6, 0.6, 0.3, 16); break;
+      case 'repair': geom = new THREE.OctahedronGeometry(0.7); break;
+      case 'spikes': geom = new THREE.TetrahedronGeometry(0.85); break;
+      default:       geom = new THREE.OctahedronGeometry(0.6);
     }
     const coreMat = new THREE.MeshStandardMaterial({
       color: baseColor,
@@ -610,11 +598,11 @@ export class RallyScene {
     });
     const core = new THREE.Mesh(geom, coreMat);
 
-    // Halo — a flat disc on the ground beneath the floating pickup.
-    const haloMat = new THREE.MeshBasicMaterial({ color: baseColor, transparent: true, opacity: 0.25, side: THREE.DoubleSide });
-    const halo = new THREE.Mesh(new THREE.RingGeometry(14, 22, 24), haloMat);
+    // Halo — flat disc on the ground beneath the floating pickup.
+    const haloMat = new THREE.MeshBasicMaterial({ color: baseColor, transparent: true, opacity: 0.28, side: THREE.DoubleSide });
+    const halo = new THREE.Mesh(new THREE.RingGeometry(0.9, 1.4, 24), haloMat);
     halo.rotation.x = -Math.PI / 2;
-    halo.position.y = -22;
+    halo.position.y = -1.35;
 
     const group = new THREE.Group();
     group.add(core);
@@ -632,7 +620,7 @@ export class RallyScene {
       let mesh = this.hazardMeshes.get(h.id);
       if (!mesh) {
         mesh = this._buildHazardMesh(h.kind);
-        mesh.position.set(h.x, 1, h.y);
+        mesh.position.set(h.x, 0.06, h.y);
         this.scene.add(mesh);
         this.hazardMeshes.set(h.id, mesh);
       }
@@ -654,47 +642,47 @@ export class RallyScene {
     const group = new THREE.Group();
     if (kind === 'mine') {
       group.add(new THREE.Mesh(
-        new THREE.CylinderGeometry(11, 13, 7, 18),
+        new THREE.CylinderGeometry(0.7, 0.8, 0.4, 18),
         new THREE.MeshStandardMaterial({ color: 0x202020, metalness: 0.4, roughness: 0.5 }),
       ));
       const ledMat = new THREE.MeshStandardMaterial({ color: 0xff3030, emissive: 0xff1020, emissiveIntensity: 1.2 });
-      const led = new THREE.Mesh(new THREE.SphereGeometry(3, 14, 10), ledMat);
-      led.position.y = 5;
+      const led = new THREE.Mesh(new THREE.SphereGeometry(0.2, 14, 10), ledMat);
+      led.position.y = 0.3;
       group.add(led);
       group.userData.led = led;
     } else if (kind === 'oil') {
       const disc = new THREE.Mesh(
-        new THREE.CircleGeometry(40, 28),
+        new THREE.CircleGeometry(2.4, 28),
         new THREE.MeshStandardMaterial({ color: 0x0a0a0c, metalness: 0.85, roughness: 0.05, transparent: true, opacity: 0.85 }),
       );
       disc.rotation.x = -Math.PI / 2;
-      disc.position.y = 0.2;
+      disc.position.y = 0.01;
       group.add(disc);
     } else if (kind === 'spikes') {
       for (let i = -2; i <= 2; i++) {
         const spike = new THREE.Mesh(
-          new THREE.ConeGeometry(3.5, 10, 5),
+          new THREE.ConeGeometry(0.18, 0.55, 5),
           new THREE.MeshStandardMaterial({ color: 0xb0b8c4, metalness: 0.7, roughness: 0.3 }),
         );
-        spike.position.set(i * 6, 5, 0);
+        spike.position.set(i * 0.35, 0.27, 0);
         group.add(spike);
       }
     }
     return group;
   }
 
-  // ---- Particles
+  // ---- Particles (sparks) — 0.18m cubes that arc with gravity (m/s²).
   emitParticle(x, y, vx, vy, life, color) {
     const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(3, 3, 3),
+      new THREE.BoxGeometry(0.18, 0.18, 0.18),
       new THREE.MeshBasicMaterial({ color, transparent: true }),
     );
-    mesh.position.set(x, 12, y);
+    mesh.position.set(x, 0.8, y);
     this.scene.add(mesh);
-    this.particles.push({ mesh, vx, vy, vyW: 80 + Math.random() * 80, life, maxLife: life });
+    this.particles.push({ mesh, vx, vy, vyW: 6 + Math.random() * 6, life, maxLife: life });
   }
 
-  emitBurst(x, y, count, color = 0xff8040, speed = 240, life = 0.5) {
+  emitBurst(x, y, count, color = 0xff8040, speed = 18, life = 0.5) {
     for (let i = 0; i < count; i++) {
       const a = Math.random() * Math.PI * 2;
       const s = speed * (0.4 + Math.random() * 0.8);

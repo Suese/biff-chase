@@ -470,8 +470,9 @@ onGameTick((dt) => {
   // Dynamic zoom: tight at standstill, pull back as the local car gains speed
   // so the player sees more of the road ahead.
   const myInterp = interpCars.get(myId);
-  const camSpeed = myInterp ? Math.hypot(myInterp.vx, myInterp.vy) : 0;
-  const speedNorm = Math.min(1, camSpeed / 700);
+  const camSpeed = myInterp ? Math.hypot(myInterp.vx, myInterp.vy) : 0;  // m/s
+  // Speeds: 0 stock = tight zoom 1.25; ~55 m/s (200 km/h) pulled back to 0.85.
+  const speedNorm = Math.min(1, camSpeed / 55);
   scene.setZoom(1.25 - speedNorm * 0.4);   // 1.25 at rest → 0.85 at full tilt
 
   // Draw cars + pickups + hazards using interpolated state
@@ -489,10 +490,10 @@ onGameTick((dt) => {
   // Minimap
   scene.drawMinimap({ ...dispState, cars: displayCars }, myId);
 
-  // Speedo (my car). Pixel→km/h: 1m≈12.4px → km/h ≈ px/sec × 0.29.
+  // Speedo: m/s → km/h is × 3.6.
   const me = displayCars.find(c => c.id === myId);
   if (me) {
-    const kmh = Math.hypot(me.vx, me.vy) * 0.29;
+    const kmh = Math.hypot(me.vx, me.vy) * 3.6;
     ui.renderSpeed(kmh);
     sfx.setEngine(kmh, me.boost > 0);
   }
