@@ -5,6 +5,39 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { PLAYER_COLORS } from './colors.js';
 import { ITEMS } from './items.js';
+import { CELL_SIZE } from './tiles.js';
+
+// ---- Road-type materials. Shared across all tiles of the same surface so
+// the GPU can batch-friendly them. Visual feel:
+//   pavement — dark grey asphalt with white dashes
+//   gravel   — warm tan, rougher
+//   ice      — cool blue-white, glassy / glossy
+const ROAD_MATS = (function makeRoadMats() {
+  return {
+    pavement: new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.88, metalness: 0.05 }),
+    gravel:   new THREE.MeshStandardMaterial({ color: 0x5a4838, roughness: 0.95, metalness: 0.0 }),
+    ice:      new THREE.MeshStandardMaterial({ color: 0x9bc6d0, roughness: 0.15, metalness: 0.2, emissive: 0x6090a0, emissiveIntensity: 0.05 }),
+  };
+})();
+const MEDIAN_MAT = new THREE.MeshStandardMaterial({ color: 0xffce3d, roughness: 0.6, metalness: 0.1 });
+const KERB_MATS = [
+  new THREE.MeshStandardMaterial({ color: 0xff3a3a, roughness: 0.55, metalness: 0.1 }),
+  new THREE.MeshStandardMaterial({ color: 0xf3f3f3, roughness: 0.55, metalness: 0.1 }),
+];
+const DASH_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+// Geometries are shared by every tile of a given shape — cheap to render
+// many instances since Three.js reuses BufferGeometry across meshes.
+const tileGeoms = {
+  // Base 4×4m road plate, slightly thick to receive shadows / not z-fight.
+  plate: new THREE.BoxGeometry(CELL_SIZE, 0.2, CELL_SIZE),
+  // Dashed lane stripe — single long dash per straight tile.
+  dash:  new THREE.BoxGeometry(CELL_SIZE * 0.6, 0.05, 0.18),
+  // Curb edges (small thin boxes near tile boundaries).
+  kerb:  new THREE.BoxGeometry(CELL_SIZE, 0.18, 0.35),
+  // Median strip for dual-lane sections.
+  median: new THREE.BoxGeometry(CELL_SIZE * 0.65, 0.32, 0.4),
+};
 
 function lerpColor(a, b, t) {
   const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
@@ -131,11 +164,20 @@ export class RallyScene {
     this.camera.lookAt(0, 0, 0);
 
     // PBR-style lighting (intensities tuned for ACES tone mapping).
-    const sun = new THREE.DirectionalLight(0xfff0d8, 3.4);
+    // Late-afternoon palette: a softer warm sun, a more saturated sky-fill
+    // hemisphere that paints cool tones into shadows, a tiny ambient lift,
+    // plus a low-rim "moon" coming from the opposite side so silhouettes
+    // get a hint of cool separation on their unlit edges.
+    const sun = new THREE.DirectionalLight(0xfff2d4, 2.6);
     sun.position.set(80, 140, 60);
     this.scene.add(sun);
-    const hemi = new THREE.HemisphereLight(0x88a0c8, 0x1a1410, 1.5);
+    const hemi = new THREE.HemisphereLight(0x6a90c8, 0x1a1410, 1.1);
     this.scene.add(hemi);
+    const rim = new THREE.DirectionalLight(0x6080a8, 0.6);
+    rim.position.set(-80, 60, -90);
+    this.scene.add(rim);
+    const ambient = new THREE.AmbientLight(0xffffff, 0.15);
+    this.scene.add(ambient);
 
     // Ground — dark slab beneath the road.
     this.ground = new THREE.Mesh(
@@ -222,8 +264,15 @@ export class RallyScene {
       p.mesh.position.x += p.vx * dt;
       p.mesh.position.z += p.vy * dt;
       p.mesh.position.y += p.vyW * dt;
-      p.vx *= 0.92; p.vy *= 0.92;
-      p.vyW -= 14 * dt;       // gravity in m/s²
+      // dt-aware air drag: lose ~30% of horizontal speed per second.
+      const drag = Math.pow(0.7, dt);
+      p.vx *= drag; p.vy *= drag;
+      p.vyW -= 9.8 * dt;
+      // Don't sink through the road.
+      if (p.mesh.position.y < 0.05 && p.vyW < 0) {
+        p.mesh.position.y = 0.05;
+        p.vyW *= -0.25;
+      }
       p.mesh.material.opacity = Math.max(0, p.life / p.maxLife);
     }
 
@@ -278,12 +327,26 @@ export class RallyScene {
       const obj = this.trackGroup.children.pop();
       this._disposeNode(obj);
     }
-    // Fresh track → clear any leftover skid marks.
     while (this.skidGroup.children.length) {
       const obj = this.skidGroup.children.pop();
       this._disposeNode(obj);
     }
     this.skidMarks.length = 0;
+
+    // Tile-based road rendering: each cell visited by the centerline gets
+    // a tile mesh. Per-tile geometry is shared (Three.js reuses the
+    // BufferGeometry across meshes) so even hundreds of tiles render in a
+    // single GPU batch per material.
+    if (track.tilePlacements?.length) {
+      for (const t of track.tilePlacements) {
+        const mat = ROAD_MATS[t.roadType] || ROAD_MATS.pavement;
+        const tile = this._buildTileGroup(t, mat);
+        if (tile) this.trackGroup.add(tile);
+      }
+      // Skip the legacy continuous-strip + walls below.
+      this._buildStartFinish(track);
+      return;
+    }
     for (const mesh of this.pickupMeshes.values()) {
       this.scene.remove(mesh);
       this._disposeNode(mesh);
@@ -366,6 +429,68 @@ export class RallyScene {
         (k % 2 === 0) ? matLight : matDark,
       );
       stripe.position.set(px, 0.08, pz);
+      stripe.rotation.y = -Math.atan2(s.ty, s.tx);
+      this.trackGroup.add(stripe);
+    }
+  }
+
+  // Build one road-tile group: the road plate + tile-type-specific surface
+  // markings (dashes, median, curb hint). Position + rotation come from the
+  // placer (`t.cx`, `t.cy` in world metres; `t.rotation` in radians around Y).
+  _buildTileGroup(t, mat) {
+    const g = new THREE.Group();
+    g.position.set(t.cx, 0, t.cy);
+    g.rotation.y = t.rotation;
+
+    // Road plate. Slightly below grade so kerbs above sit proud.
+    const plate = new THREE.Mesh(tileGeoms.plate, mat);
+    plate.position.y = 0.05;
+    g.add(plate);
+
+    if (t.type === 'straight') {
+      // Two short white dashes along the centre line.
+      for (const z of [-0.9, 0.9]) {
+        const dash = new THREE.Mesh(tileGeoms.dash, DASH_MAT);
+        dash.position.set(0, 0.17, z);
+        g.add(dash);
+      }
+    } else if (t.type === 'corner') {
+      // Tight 90° turn — sweep a thin arc-shaped white marking inside the
+      // cell as the apex line. Built as a few small dashes along an arc.
+      const dashMat = DASH_MAT;
+      const radius = CELL_SIZE * 0.25;
+      const arcSteps = 6;
+      for (let i = 0; i < arcSteps; i++) {
+        const a = (-Math.PI / 2) + (i / arcSteps) * (Math.PI / 2);
+        const x = -CELL_SIZE / 2 + radius + Math.cos(a) * radius;
+        const z = -CELL_SIZE / 2 + radius + Math.sin(a) * radius;
+        const d = new THREE.Mesh(tileGeoms.dash, dashMat);
+        d.position.set(x, 0.17, z);
+        d.rotation.y = a + Math.PI / 2;
+        d.scale.x = 0.5;
+        g.add(d);
+      }
+    }
+    // (dual / diagonal tiles can be added here later)
+
+    return g;
+  }
+
+  // Just the checkered finish band — called from the tile-based buildTrack
+  // path because that route skips the legacy walls/curbs/dashes section.
+  _buildStartFinish(track) {
+    const s = track.start;
+    const matLight = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    const matDark  = new THREE.MeshLambertMaterial({ color: 0x111111 });
+    const numStripes = Math.max(4, Math.floor(s.width / 1.5));
+    for (let k = -numStripes; k <= numStripes; k++) {
+      const px = s.x + s.nx * (k * 0.8);
+      const pz = s.y + s.ny * (k * 0.8);
+      const stripe = new THREE.Mesh(
+        new THREE.BoxGeometry(1.6, 0.08, 0.8),
+        (k % 2 === 0) ? matLight : matDark,
+      );
+      stripe.position.set(px, 0.18, pz);
       stripe.rotation.y = -Math.atan2(s.ty, s.tx);
       this.trackGroup.add(stripe);
     }
@@ -805,18 +930,24 @@ export class RallyScene {
     return group;
   }
 
-  // ---- Particles (sparks) — 0.18m cubes that arc with gravity (m/s²).
+  // ---- Particles (sparks). All velocities in m/s, gravity ≈ 9.8 m/s².
+  // Sparks IRL travel a few metres per second; the previous tunings were
+  // left over from the pixel-scale codebase.
   emitParticle(x, y, vx, vy, life, color) {
     const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(0.18, 0.18, 0.18),
+      new THREE.BoxGeometry(0.12, 0.12, 0.12),
       new THREE.MeshBasicMaterial({ color, transparent: true }),
     );
-    mesh.position.set(x, 0.8, y);
+    mesh.position.set(x, 0.6, y);
     this.scene.add(mesh);
-    this.particles.push({ mesh, vx, vy, vyW: 6 + Math.random() * 6, life, maxLife: life });
+    this.particles.push({
+      mesh, vx, vy,
+      vyW: 1.5 + Math.random() * 1.6,    // small upward kick (m/s)
+      life, maxLife: life,
+    });
   }
 
-  emitBurst(x, y, count, color = 0xff8040, speed = 18, life = 0.5) {
+  emitBurst(x, y, count, color = 0xff8040, speed = 6, life = 0.5) {
     for (let i = 0; i < count; i++) {
       const a = Math.random() * Math.PI * 2;
       const s = speed * (0.4 + Math.random() * 0.8);
