@@ -102,7 +102,10 @@ export function generateTrack(seed) {
     const b = biomeMap.map[p.gy][p.gx];
     if (b === FOREST) p.roadType = 'gravel';
   }
-  const wallSegments = wallSegmentsFromTiles(tilePlacements);
+  // wallSegments + outputTiles will be computed after metaMap is built (we
+  // need the full meta-grid to read corner biomes for every output tile).
+  let outputTiles = [];
+  let wallSegments = [];
 
   // 6. Start tile = roadCells[0] (after the rotation above). Facing
   // direction = the axial fwd vector computed earlier.
@@ -157,7 +160,18 @@ export function generateTrack(seed) {
     }
   }
 
-  // 10. World bounds.
+  // 10. Half-offset output tiles — paint the actual rendered grid from
+  // the meta-map. Each output tile reads 4 surrounding meta-cells and
+  // emits the wall segments inside itself based on the 4-corner road
+  // pattern (16 cases). Adjacent output tiles share two corners, so
+  // their walls join automatically at the shared midpoints.
+  outputTiles = buildOutputTiles(metaMap, GRID_SIZE);
+  wallSegments = [];
+  for (const t of outputTiles) {
+    for (const w of t.walls) wallSegments.push(w);
+  }
+
+  // 11. World bounds.
   const bounds = {
     minX: -WORLD_HALF, minY: -WORLD_HALF,
     maxX:  WORLD_HALF, maxY:  WORLD_HALF,
