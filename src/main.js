@@ -417,7 +417,7 @@ onGameTick((dt) => {
   if (interpCars.has(myId)) cam = interpCars.get(myId);
   else if (interpCars.size > 0) cam = interpCars.values().next().value;
   if (cam) scene.setCameraTarget(cam.x, cam.y);
-  scene.setZoom(0.85);
+  scene.setZoom(0.65);    // wider view so we can see other cars
 
   // Draw cars + pickups + hazards using interpolated state
   const dispState = lastState;
