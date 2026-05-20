@@ -21,7 +21,7 @@ import {
   generateBiomeMap, pickCheckpoints, carveRoad,
   cellToWorld, WATER, LAND, FOREST, MOUNTAIN, ROAD,
 } from './terrain.js';
-import { autotileRoad, dilateRoadCells, wallSegmentsFromTiles } from './tiles.js';
+import { autotileRoad, dilateRoadCells, buildOutputTiles } from './tiles.js';
 
 export function generateTrack(seed) {
   const rng = mulberry32(seed >>> 0);
