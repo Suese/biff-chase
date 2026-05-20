@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rally of Death — Gutshot Interactive</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <div id="canvas-root"></div>
+
+    <button id="mute-btn" title="Mute / unmute">🔊</button>
+
+    <!-- Lobby -->
+    <div id="lobby" class="overlay">
+      <div class="panel">
+        <h1>Rally of Death</h1>
+        <p class="tag">Procedural top-down rally combat. First to 10 wins.</p>
+
+        <label>
+          Your name
+          <input id="name-input" type="text" maxlength="16" placeholder="Driver" />
+        </label>
+
+        <div id="lobby-host" class="row">
+          <button id="host-btn" class="primary">Host a race</button>
+        </div>
+
+        <div id="lobby-divider" class="divider"><span>or</span></div>
+
+        <div id="lobby-join">
+          <label id="lobby-join-code-label">
+            Room link or code
+            <input id="join-code" type="text" maxlength="500" placeholder="https://… or abc-123-xyz" />
+          </label>
+          <div class="row">
+            <button id="join-btn" class="primary">Join race</button>
+          </div>
+        </div>
+
+        <div id="lobby-status" class="status"></div>
+      </div>
+    </div>
+
+    <!-- Waiting room -->
+    <div id="waiting" class="overlay hidden">
+      <div class="panel">
+        <h2>Pit Lane</h2>
+        <p>Share this link — drivers can join any time:</p>
+        <div class="code-box">
+          <code id="room-code"></code>
+        </div>
+        <div class="share-row">
+          <button id="share-copy" class="share-btn copy">🔗 Copy Link</button>
+        </div>
+        <h3>Drivers</h3>
+        <ul id="player-list"></ul>
+        <div class="row" id="host-controls">
+          <button id="start-btn" class="primary">Start race</button>
+        </div>
+        <p class="tag" id="waiting-tag"></p>
+      </div>
+    </div>
+
+    <!-- In-race HUD -->
+    <div id="game-ui" class="hidden">
+      <div id="scoreboard"></div>
+      <div id="race-banner"></div>
+      <div id="minimap"></div>
+      <div id="speedo">
+        <div id="speed-text">0</div>
+        <div id="speed-label">KMH</div>
+      </div>
+      <div id="lap-counter">Lap 0 / 0</div>
+      <div id="inventory"></div>
+      <div id="log-panel">
+        <span id="log-preview" aria-hidden="true"></span>
+        <button id="log-toggle" type="button" aria-label="Minimize log" title="Minimize log">▼</button>
+        <div id="log"></div>
+      </div>
+    </div>
+
+    <!-- Shop (between races) -->
+    <div id="shop-modal" class="overlay hidden">
+      <div class="panel shop-panel">
+        <div class="shop-header">
+          <h2>🔧 Garage</h2>
+          <div class="shop-balance">
+            Scrap: <span id="shop-balance">0</span>
+          </div>
+          <button id="shop-close">Ready</button>
+        </div>
+        <p class="tag">Spend scrap before the next race.</p>
+        <div id="shop-grid"></div>
+        <h3>Match standings</h3>
+        <ul id="match-scores"></ul>
+        <p class="tag" id="shop-waiting"></p>
+      </div>
+    </div>
+
+    <!-- End screen -->
+    <div id="end-screen" class="overlay hidden">
+      <div class="panel end-panel">
+        <h1 id="end-title">Match over</h1>
+        <div class="end-body">
+          <ul id="final-scores"></ul>
+        </div>
+        <div class="row">
+          <button id="play-again-btn" class="primary">Back to pit lane</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
