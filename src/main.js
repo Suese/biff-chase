@@ -74,22 +74,35 @@ ui.bindShop({
 // Initialise the renderer in the background. Surface any failure into the
 // lobby status so it never disappears silently.
 let _sceneReady = false;
-const _sceneReadyPromise = scene.init().then(() => {
+scene.init().then(() => {
   _sceneReady = true;
-  scene.onTick(() => tickClock());
 }).catch(err => {
   console.error('Renderer init failed', err);
   ui.setLobbyStatus('Renderer failed to start: ' + (err?.message || err));
 });
+
+// Master tick loop — runs on plain rAF so the room, clock, and scheduled
+// timers run independently of whether PixiJS is ready. Scene render callbacks
+// are dispatched via scene.onTick when the scene exists.
+let _lastTickMs = performance.now();
+const rafTickCbs = [];
+function rafTick(now) {
+  const dt = Math.min(0.1, (now - _lastTickMs) / 1000);
+  _lastTickMs = now;
+  tickClock();
+  for (const cb of rafTickCbs) cb(dt);
+  if (_sceneReady) scene._driveTick(dt);
+  requestAnimationFrame(rafTick);
+}
+requestAnimationFrame(rafTick);
+
+function onGameTick(cb) { rafTickCbs.push(cb); }
 
 async function startHost() {
   myName = ui.readNameInput();
   if (!myName) { ui.setLobbyStatus('Enter your name first.'); return; }
   ui.persistName(myName);
   ui.setLobbyStatus('Connecting to peer network...');
-  // Make sure the renderer is up before we actually enter a race — the lobby
-  // itself is fine without it.
-  await _sceneReadyPromise;
   host = new HostNet();
   try {
     myId = await host.start();
@@ -124,8 +137,10 @@ async function startHost() {
     }
   });
 
-  // Host's tick — drives the room's physics + state broadcasts.
-  scene.onTick((dt) => { if (room) room.tick(dt); });
+  // Host's tick — drives the room's physics + state broadcasts. Lives on the
+  // master rAF loop, not on PixiJS's ticker, so the host runs even if the
+  // renderer somehow fails to initialise.
+  onGameTick((dt) => { if (room) room.tick(dt); });
 
   mode = 'host';
   enterWaitingRoom(myId);
@@ -150,7 +165,6 @@ async function startClient() {
   if (!myName) { ui.setLobbyStatus('Enter your name first.'); return; }
   ui.persistName(myName);
   ui.setLobbyStatus('Connecting...');
-  await _sceneReadyPromise;
 
   client = new ClientNet();
   try {
@@ -350,8 +364,9 @@ function angleDelta(a, b) {
 
 // ---- Render tick: drive the scene from interpolated state ----
 let countdownLastSec = -1;
-scene.onTick((dt) => {
+onGameTick((dt) => {
   if (!lastState) return;
+  if (!_sceneReady) return;     // canvas isn't up yet — skip rendering
 
   // Local input extrapolation for my own car (cheap dead-reckon)
   if (myId && interpCars.has(myId)) {

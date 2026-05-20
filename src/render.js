@@ -71,10 +71,16 @@ export class RallyScene {
     this.minimapGfx = new Graphics();
     this.hud.addChild(this.minimapGfx);
 
-    this.app.ticker.add(this._onTick.bind(this));
+    // The PixiJS ticker only RENDERS — the game tick is driven externally via
+    // _driveTick(dt) from main.js's master rAF loop. This way physics keeps
+    // running even if PixiJS somehow stalls.
+    this.app.ticker.autoStart = true;
   }
 
   onTick(cb) { this.tickCbs.push(cb); }
+
+  // Called by the external rAF loop with a real dt.
+  _driveTick(dt) { this._onTick({ deltaMS: dt * 1000 }); }
 
   _onTick(ticker) {
     const dt = ticker.deltaMS / 1000;
