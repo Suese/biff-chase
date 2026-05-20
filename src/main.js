@@ -287,26 +287,31 @@ function applyState(state) {
     }
   }
 
-  // Bring interp targets up to date
+  // Bring interp targets up to date. Soft-blend toward the authoritative
+  // snapshot for everyone — the local car still feels responsive because
+  // we dead-reckon its velocity each render frame; remote cars stop jittering
+  // because the snap-to-snap delta gets eased over a couple of frames.
   if (state.cars) {
     const present = new Set();
     for (const c of state.cars) {
       present.add(c.id);
-      const t = interpCars.get(c.id) || { x: c.x, y: c.y, a: c.a, vx: 0, vy: 0, w: 0 };
-      // For OUR car: keep our predicted position when very close — otherwise snap.
-      if (c.id === myId && Math.hypot(t.x - c.x, t.y - c.y) < 24) {
-        // Soft pull
-        t.x += (c.x - t.x) * 0.25;
-        t.y += (c.y - t.y) * 0.25;
-        t.a += angleDelta(t.a, c.a) * 0.3;
-      } else {
-        t.x = c.x; t.y = c.y; t.a = c.a;
+      const t = interpCars.get(c.id);
+      if (!t) {
+        interpCars.set(c.id, {
+          x: c.x, y: c.y, a: c.a,
+          vx: c.vx, vy: c.vy, w: c.w,
+          boost: c.boost, alive: c.alive,
+        });
+        continue;
       }
+      // Always blend; the dead-reckon between snapshots covers the gap.
+      const localPull = c.id === myId ? 0.18 : 0.55;
+      t.x += (c.x - t.x) * localPull;
+      t.y += (c.y - t.y) * localPull;
+      t.a += angleDelta(t.a, c.a) * localPull;
       t.vx = c.vx; t.vy = c.vy; t.w = c.w;
       t.boost = c.boost;
       t.alive = c.alive;
-      t.lastUpdateMs = performance.now();
-      interpCars.set(c.id, t);
     }
     for (const id of [...interpCars.keys()]) {
       if (!present.has(id)) interpCars.delete(id);

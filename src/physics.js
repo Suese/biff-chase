@@ -202,16 +202,21 @@ export function respawnCar(body, x, y, angle) {
 }
 
 // ---------- Snapshot helpers ----------
+//
+// Snapshots carry velocity in per-SECOND units (sane engineering units that
+// clients can integrate with normal dt). The host's Matter body stores
+// velocity in per-STEP units, so we scale at this boundary.
 
 export function carSnapshot(body) {
+  const stepRate = 1 / FIXED_DT;   // 60 if FIXED_DT = 1/60
   return {
     id: body.ownerId,
     x: body.position.x,
     y: body.position.y,
     a: body.angle,
-    vx: body.velocity.x,
-    vy: body.velocity.y,
-    w: body.angularVelocity,
+    vx: body.velocity.x * stepRate,
+    vy: body.velocity.y * stepRate,
+    w: body.angularVelocity * stepRate,
     boost: body.boost,
     oiled: body.oiled,
     health: body.health,
@@ -222,10 +227,11 @@ export function carSnapshot(body) {
 }
 
 export function applyCarSnapshot(body, snap) {
+  const stepRate = 1 / FIXED_DT;
   Matter.Body.setPosition(body, { x: snap.x, y: snap.y });
   Matter.Body.setAngle(body, snap.a);
-  Matter.Body.setVelocity(body, { x: snap.vx, y: snap.vy });
-  Matter.Body.setAngularVelocity(body, snap.w);
+  Matter.Body.setVelocity(body, { x: snap.vx / stepRate, y: snap.vy / stepRate });
+  Matter.Body.setAngularVelocity(body, snap.w / stepRate);
   body.boost = snap.boost;
   body.oiled = snap.oiled;
   body.health = snap.health;

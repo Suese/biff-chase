@@ -84,12 +84,14 @@ export class GameRoom {
     this.upgrades[id]    = this.upgrades[id]    || { engine: 0, tires: 0, armor: 0, fuel: 0 };
     this.inventories[id] = this.inventories[id] || {};
     // Spawn a car for late joiners so they don't sit out the current race.
+    // We don't have an existing entity for them yet, so the spawn always runs.
     if ((this.phase === 'countdown' || this.phase === 'racing') && this.engine && this.track) {
       this._spawnCarForPlayer(id, name);
       // Force the next snapshot to include the full track so the new client
       // can render it before they see their car.
       this._lastBroadcastTrackSeed = null;
     }
+    console.log('[room] addPlayer', { id, name, phase: this.phase, totalPlayers: this.players.length, hasCar: this.cars.has(id) });
     this.emitState();
     this.emitEvent({ type: 'log', text: `${name} joined.` });
   }
@@ -97,11 +99,14 @@ export class GameRoom {
   // Spawn a single car at the back of the current grid. Used by beginRace and
   // by addPlayer for late joiners.
   _spawnCarForPlayer(playerId, playerName) {
-    const slot = gridSpawnPositions(this.track, this.players.length)[
-      // Late joiners go to the BACK of the grid (last index).
-      this.players.findIndex(p => p.id === playerId)
-    ];
-    if (!slot) return;
+    if (this.cars.has(playerId)) return;     // already has one
+    const slots = gridSpawnPositions(this.track, this.players.length);
+    const idx = this.players.findIndex(p => p.id === playerId);
+    const slot = slots[idx] || slots[slots.length - 1];
+    if (!slot) {
+      console.warn('[room] _spawnCarForPlayer no slot', { playerId, idx, slots: slots.length });
+      return;
+    }
     const stats = computeStats(this.upgrades[playerId] || {});
     const body = createCarBody(slot.x, slot.y, slot.angle, playerId, stats);
     Matter.Composite.add(this.engine.world, body);
@@ -109,6 +114,7 @@ export class GameRoom {
     const ent = makeCarEntity({ body, driverId: playerId, driverName: playerName });
     this.ecs.addEntity(ent);
     this.carEntities.set(playerId, ent);
+    console.log('[room] _spawnCarForPlayer', { playerId, idx, slot, totalCars: this.cars.size });
   }
 
   removePlayer(id) {
@@ -164,6 +170,7 @@ export class GameRoom {
     this.cars.clear();
 
     this.players.forEach((p) => this._spawnCarForPlayer(p.id, p.name));
+    console.log('[room] beginRace', { players: this.players.length, cars: this.cars.size, carEntities: this.carEntities.size });
 
     // Pickups
     const rng = mulberry32(seed ^ 0xCAFEBABE);
