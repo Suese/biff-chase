@@ -553,46 +553,13 @@ export class RallyScene {
       }
     }
 
-    // 2) Road tiles + their walls (one per meta-cell).
+    // 2) Road tiles + their walls (one per meta-cell). Plain asphalt
+    // plate, no centre-line / dash / cross markings.
     for (const p of track.tilePlacements || []) {
       const roadMat = ROAD_MATS[p.roadType] || ROAD_MATS.pavement;
       const plate = new THREE.Mesh(tileRoad, roadMat);
       plate.position.set(p.cx, 0.05, p.cy);
       this.trackGroup.add(plate);
-
-      // Centre marking: a single dash for straights, two for crosses,
-      // an arc-of-dashes for corners.
-      if (p.type === 'straight') {
-        const d = new THREE.Mesh(dashGeom, DASH_MAT);
-        d.position.set(p.cx, 0.15, p.cy);
-        d.rotation.y = p.rotation;
-        this.trackGroup.add(d);
-      } else if (p.type === 'corner') {
-        // 5 small dashes following the apex arc, oriented by p.rotation.
-        const r = TILE * 0.32;
-        for (let i = 0; i < 5; i++) {
-          const a = (i / 4) * (Math.PI / 2);
-          const lx = -HALF + r + Math.cos(a - Math.PI / 2) * r;
-          const lz = -HALF + r + Math.sin(a - Math.PI / 2) * r;
-          // Rotate (lx, lz) by p.rotation about cell centre.
-          const cs = Math.cos(p.rotation), sn = Math.sin(p.rotation);
-          const wx = cs * lx - sn * lz;
-          const wz = sn * lx + cs * lz;
-          const d = new THREE.Mesh(dashGeom, DASH_MAT);
-          d.position.set(p.cx + wx, 0.15, p.cy + wz);
-          d.rotation.y = a + p.rotation;
-          d.scale.x = 0.45;
-          this.trackGroup.add(d);
-        }
-      } else if (p.type === 'cross') {
-        const d1 = new THREE.Mesh(dashGeom, DASH_MAT);
-        d1.position.set(p.cx, 0.15, p.cy);
-        this.trackGroup.add(d1);
-        const d2 = new THREE.Mesh(dashGeom, DASH_MAT);
-        d2.position.set(p.cx, 0.15, p.cy);
-        d2.rotation.y = Math.PI / 2;
-        this.trackGroup.add(d2);
-      }
 
       // Walls baked into the tile — one per side that ISN'T another road.
       // Each side is a 4 m wall along the tile's outer edge.
