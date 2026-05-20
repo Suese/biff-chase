@@ -38,21 +38,29 @@ export function makeHazardEntity({ id, kind, ownerId, x, y, ttl }) {
   return e;
 }
 
-// Helpers. CRITICAL: ecs-lib's Iterator.each BREAKS when the callback returns
-// `false` (line 334 of node_modules/ecs-lib/index.js). Returning anything
-// else (undefined / true) continues. We return undefined so we process every
-// matching entity.
+// ecs-lib 0.7.0's Iterator is broken: the closure inside ECS.prototype.query
+// advances its `index` via the for-loop's update expression, which is SKIPPED
+// when the body `return`s a matching entity. So `next()` returns the same
+// entity forever, and `each()` only terminates if the callback returns
+// strictly `false`. We bypass it entirely by walking the entity array.
 export function eachCar(ecs, cb) {
-  ecs.query([RigidBody.type, Driver.type, Lap.type]).each(e => {
+  for (const e of ecs.entities) {
+    if (!e.active) continue;
     const rb = RigidBody.oneFrom(e);
     if (rb?.data?.kind === 'car') cb(e);
-  });
+  }
 }
 export function eachPickup(ecs, cb) {
-  ecs.query([Pickup.type]).each(e => { cb(e); });
+  for (const e of ecs.entities) {
+    if (!e.active) continue;
+    if (Pickup.oneFrom(e)) cb(e);
+  }
 }
 export function eachHazard(ecs, cb) {
-  ecs.query([Hazard.type]).each(e => { cb(e); });
+  for (const e of ecs.entities) {
+    if (!e.active) continue;
+    if (Hazard.oneFrom(e)) cb(e);
+  }
 }
 
 export function getRigidBody(e)  { return RigidBody.oneFrom(e)?.data?.body || null; }
