@@ -9,6 +9,12 @@
 // player's car.
 
 import { Application, Container, Graphics, Text } from 'pixi.js';
+
+function lerpColor(a, b, t) {
+  const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
+  const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff;
+  return ((ar + (br - ar) * t) | 0) << 16 | ((ag + (bg - ag) * t) | 0) << 8 | ((ab + (bb - ab) * t) | 0);
+}
 import { ITEMS } from './items.js';
 import { mulberry32 } from './rng.js';
 import { PLAYER_COLORS } from './colors.js';
@@ -29,6 +35,7 @@ export class RallyScene {
     this.tickCbs = [];
     this.camera = { x: 0, y: 0, zoom: 1.0, targetZoom: 1.0 };
     this.carGfx = new Map();        // id -> Graphics container
+    this.carFlashUntil = new Map(); // id -> performance.now() ms ceiling
     this.pickupGfx = new Map();     // slotIndex -> Graphics
     this.hazardGfx = new Map();     // id -> Graphics
     this.particles = [];            // { g, vx, vy, life, max, fade }
@@ -310,18 +317,30 @@ export class RallyScene {
     g.rect( W/2 - 1,  L/2 - 18, 4, 12).fill({ color: 0x000 });
   }
 
+  flashCar(playerId, ms = 200) {
+    this.carFlashUntil.set(playerId, performance.now() + ms);
+  }
+
   syncCars(state, t) {
     const presentIds = new Set();
+    const now = performance.now();
     for (const car of state.cars) {
       presentIds.add(car.id);
       const colorIdx = state.players.findIndex(p => p.id === car.id);
       const g = this.ensureCar(car.id, colorIdx < 0 ? 0 : colorIdx);
       g.x = car.x;
       g.y = car.y;
-      // Matter angle 0 = facing +X. Our car geometry is drawn facing +Y. Rotate -90°.
       g.rotation = car.a - Math.PI / 2;
       g.alpha = car.alive ? 1 : 0.3;
-      g.bodyGfx.tint = car.alive ? 0xffffff : 0x666666;
+      // Damage flash overrides the alive/dead tint — pulses red→white for
+      // ~200ms after a hit so the player sees their car react.
+      const flashUntil = this.carFlashUntil.get(car.id) || 0;
+      if (flashUntil > now) {
+        const pct = (flashUntil - now) / 200;
+        g.bodyGfx.tint = lerpColor(0xffffff, 0xff5060, 1 - pct);
+      } else {
+        g.bodyGfx.tint = car.alive ? 0xffffff : 0x666666;
+      }
       const p = state.players.find(p => p.id === car.id);
       if (p && g.tagGfx) g.tagGfx.text = p.name;
       // Boost trail

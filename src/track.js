@@ -11,24 +11,32 @@ import { mulberry32, rfloat } from './rng.js';
 export function generateTrack(seed) {
   const rng = mulberry32(seed >>> 0);
 
-  // World-space radius range and shape. Death Rally-style — roughly circular
-  // with chunky lobes.
-  const N = 14;                  // base vertices before smoothing
-  const baseR = 1400;
-  const jitter = 700;
+  // Track is built from a polygon snapped roughly to a coarse grid — gives
+  // the angular, "fills the page" Death Rally feel rather than the round
+  // race-around-a-doughnut shape.
+  const N = 18 + Math.floor(rng() * 5);    // 18-22 vertices
+  const baseR = 850;
+  const radJitter = 320;
+  const gridStep = 140;                    // snap vertex coords to multiples of this
   const ctrl = [];
   for (let i = 0; i < N; i++) {
-    const a = (i / N) * Math.PI * 2;
-    const r = baseR + rfloat(rng, -jitter, jitter);
-    ctrl.push({ x: Math.cos(a) * r, y: Math.sin(a) * r });
+    const a = (i / N) * Math.PI * 2 + rfloat(rng, -0.1, 0.1);
+    const r = baseR + rfloat(rng, -radJitter, radJitter);
+    let x = Math.cos(a) * r;
+    let y = Math.sin(a) * r;
+    // Snap to grid so segments end up biased toward axis-aligned runs and
+    // ~90° turns rather than gentle curves.
+    x = Math.round(x / gridStep) * gridStep;
+    y = Math.round(y / gridStep) * gridStep;
+    ctrl.push({ x, y });
   }
 
-  // Chaikin smoothing — 3 passes makes a very smooth closed loop.
-  let pts = ctrl;
-  for (let pass = 0; pass < 3; pass++) pts = chaikinClosed(pts);
+  // Single Chaikin pass — barely rounds the polygon corners, doesn't melt
+  // them away.
+  let pts = chaikinClosed(ctrl);
 
-  // Resample to roughly even arc length so wall offsets are clean.
-  pts = resampleByArc(pts, 50);
+  // Resample at a coarser interval so the wall mesh stays light.
+  pts = resampleByArc(pts, 60);
 
   // Per-vertex track width with smooth variation. Base is wide enough that a
   // 4-wide starting grid (≈ 180 px including car widths + gaps) fits in any

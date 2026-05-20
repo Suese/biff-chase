@@ -71,11 +71,11 @@ export function createCarBody(x, y, angle, ownerId, stats) {
   const body = Matter.Bodies.rectangle(x, y, CAR_WIDTH, CAR_LENGTH, {
     angle,
     density: 0.002,
-    // We apply our own engine braking + lateral friction in stepCar; don't
-    // let Matter double-up.
     frictionAir: 0,
     friction: 0.05,
-    restitution: 0.25,
+    // Low restitution so walls don't kick the car back hard — instead it
+    // slides along the wall and we spawn sparks.
+    restitution: 0.05,
     label: 'car',
     chamfer: { radius: 6 },
   });

@@ -381,10 +381,26 @@ function applyEvent(ev) {
     case 'mine_hit':
       sfx.mineBoom();
       scene.emitBurst(ev.x, ev.y, 24, 0xff6a3d, 320, 0.6);
+      scene.flashCar(ev.playerId, 280);
       break;
     case 'spikes_hit':
       sfx.collide(0.6);
       scene.emitBurst(ev.x, ev.y, 12, 0xaab0bd, 200, 0.5);
+      scene.flashCar(ev.playerId, 220);
+      break;
+    case 'bump':
+      if (ev.intensity > 0.15) sfx.collide(Math.min(1, ev.intensity));
+      scene.emitBurst(ev.x, ev.y, Math.round(4 + ev.intensity * 10), 0xffce3d, 140 + ev.intensity * 180, 0.4);
+      if (ev.intensity > 0.4) scene.flashCar(ev.playerId, 160);
+      break;
+    case 'grind':
+      sfx.skid();
+      // Sparks shoot OUT from the contact point in a small fan
+      for (let i = 0; i < Math.round(4 + ev.intensity * 8); i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const sp = 80 + Math.random() * 200 * ev.intensity;
+        scene.emitParticle(ev.x, ev.y, Math.cos(ang) * sp, Math.sin(ang) * sp, 0.35, 0xffe07a);
+      }
       break;
     case 'race_over':
       sfx.beep(880, 0.4, 'sine', 0.35);

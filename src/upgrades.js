@@ -45,7 +45,7 @@ export function computeStats(upgrades = {}) {
     accel:      520 + eng * 90,
     brake:      900 + eng * 30,
     reverse:    180 + eng * 20,
-    grip:       0.85 + tir * 0.025, // lateral friction coefficient (caps near 1.0)
+    grip:       0.55 + tir * 0.06,  // lateral friction coefficient — lower = more drift
     turnSpeed:  3.0 + tir * 0.35,   // rad/sec
     armor:      100 + arm * 35,
     nitroMul:   1.0 + fue * 0.25,   // multiplies nitro duration
