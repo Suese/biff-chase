@@ -193,12 +193,6 @@ export class GameRoom {
     this._lastBroadcastTrackSeed = null;
     this.emitState();
     this.emitEvent({ type: 'race_start', raceNumber: this.raceNumber, seed });
-    if (this.track?.sections?.length) {
-      const summary = this.track.sections
-        .map(s => `${s.connector}/${s.roadType[0]}`)
-        .join(' → ');
-      this.emitEvent({ type: 'log', text: `Sections: ${summary}` });
-    }
   }
 
   endRace() {

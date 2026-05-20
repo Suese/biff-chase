@@ -6,37 +6,35 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { PLAYER_COLORS } from './colors.js';
 import { ITEMS } from './items.js';
 import { CELL_SIZE } from './tiles.js';
+import { WATER, LAND, FOREST, MOUNTAIN } from './terrain.js';
 
-// ---- Road-type materials. Shared across all tiles of the same surface so
-// the GPU can batch-friendly them. Visual feel:
-//   pavement — dark grey asphalt with white dashes
-//   gravel   — warm tan, rougher
-//   ice      — cool blue-white, glassy / glossy
-const ROAD_MATS = (function makeRoadMats() {
-  return {
-    pavement: new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.88, metalness: 0.05 }),
-    gravel:   new THREE.MeshStandardMaterial({ color: 0x5a4838, roughness: 0.95, metalness: 0.0 }),
-    ice:      new THREE.MeshStandardMaterial({ color: 0x9bc6d0, roughness: 0.15, metalness: 0.2, emissive: 0x6090a0, emissiveIntensity: 0.05 }),
-  };
-})();
-const MEDIAN_MAT = new THREE.MeshStandardMaterial({ color: 0xffce3d, roughness: 0.6, metalness: 0.1 });
-const KERB_MATS = [
-  new THREE.MeshStandardMaterial({ color: 0xff3a3a, roughness: 0.55, metalness: 0.1 }),
-  new THREE.MeshStandardMaterial({ color: 0xf3f3f3, roughness: 0.55, metalness: 0.1 }),
-];
+// ---- Materials shared across every cell of a given biome / road type.
+
+const BIOME_MATS = {
+  [WATER]:    new THREE.MeshStandardMaterial({ color: 0x1e3a5c, roughness: 0.30, metalness: 0.10, emissive: 0x102030, emissiveIntensity: 0.10 }),
+  [LAND]:     new THREE.MeshStandardMaterial({ color: 0x3a5828, roughness: 0.95, metalness: 0.00 }),
+  [FOREST]:   new THREE.MeshStandardMaterial({ color: 0x244c20, roughness: 0.92, metalness: 0.00 }),
+  [MOUNTAIN]: new THREE.MeshStandardMaterial({ color: 0x6e6862, roughness: 0.85, metalness: 0.05 }),
+};
+const ROAD_MATS = {
+  pavement: new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.88, metalness: 0.05 }),
+  gravel:   new THREE.MeshStandardMaterial({ color: 0x5a4838, roughness: 0.96, metalness: 0.0 }),
+  ice:      new THREE.MeshStandardMaterial({ color: 0x9bc6d0, roughness: 0.15, metalness: 0.2, emissive: 0x6090a0, emissiveIntensity: 0.05 }),
+};
 const DASH_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff });
+const TRUNK_MAT = new THREE.MeshStandardMaterial({ color: 0x3a2418, roughness: 0.95, metalness: 0.0 });
+const FOLIAGE_MAT = new THREE.MeshStandardMaterial({ color: 0x1f5024, roughness: 0.85, metalness: 0.0 });
+const ROCK_MAT = new THREE.MeshStandardMaterial({ color: 0x8a8780, roughness: 0.85, metalness: 0.05 });
 
-// Geometries are shared by every tile of a given shape — cheap to render
-// many instances since Three.js reuses BufferGeometry across meshes.
+// Geometries — shared so all tile instances of one shape batch together.
 const tileGeoms = {
-  // Base 4×4m road plate, slightly thick to receive shadows / not z-fight.
-  plate: new THREE.BoxGeometry(CELL_SIZE, 0.2, CELL_SIZE),
-  // Dashed lane stripe — single long dash per straight tile.
-  dash:  new THREE.BoxGeometry(CELL_SIZE * 0.6, 0.05, 0.18),
-  // Curb edges (small thin boxes near tile boundaries).
-  kerb:  new THREE.BoxGeometry(CELL_SIZE, 0.18, 0.35),
-  // Median strip for dual-lane sections.
-  median: new THREE.BoxGeometry(CELL_SIZE * 0.65, 0.32, 0.4),
+  ground: new THREE.BoxGeometry(CELL_SIZE, 0.4, CELL_SIZE),
+  road:   new THREE.BoxGeometry(CELL_SIZE, 0.22, CELL_SIZE),
+  dash:   new THREE.BoxGeometry(CELL_SIZE * 0.45, 0.05, 0.18),
+  trunk:  new THREE.CylinderGeometry(0.18, 0.22, 1.4, 6),
+  foliage: new THREE.ConeGeometry(1.0, 2.4, 7),
+  rock:   new THREE.ConeGeometry(2.2, 4.2, 5),
+  water:  new THREE.BoxGeometry(CELL_SIZE * 1.001, 0.05, CELL_SIZE * 1.001),
 };
 
 function lerpColor(a, b, t) {
@@ -333,17 +331,18 @@ export class RallyScene {
     }
     this.skidMarks.length = 0;
 
-    // Tile-based road rendering: each cell visited by the centerline gets
-    // a tile mesh. Per-tile geometry is shared (Three.js reuses the
-    // BufferGeometry across meshes) so even hundreds of tiles render in a
-    // single GPU batch per material.
+    // ---- Biome ground tiles first.
+    if (track.biomeCells?.length) {
+      this._buildBiomeGround(track);
+    }
+
+    // ---- Road tiles on top.
     if (track.tilePlacements?.length) {
       for (const t of track.tilePlacements) {
         const mat = ROAD_MATS[t.roadType] || ROAD_MATS.pavement;
-        const tile = this._buildTileGroup(t, mat);
+        const tile = this._buildRoadTile(t, mat);
         if (tile) this.trackGroup.add(tile);
       }
-      // Skip the legacy continuous-strip + walls below.
       this._buildStartFinish(track);
       return;
     }
@@ -434,44 +433,119 @@ export class RallyScene {
     }
   }
 
-  // Build one road-tile group: the road plate + tile-type-specific surface
-  // markings (dashes, median, curb hint). Position + rotation come from the
-  // placer (`t.cx`, `t.cy` in world metres; `t.rotation` in radians around Y).
-  _buildTileGroup(t, mat) {
+  // Build the BIOME GROUND layer — one mesh per non-road cell. The ground
+  // sits slightly below the road surface so the road reads as raised on
+  // top. Mountains add a rock cone, forest adds a couple of low trees,
+  // water lowers the ground a few cm and lays a translucent water plane.
+  _buildBiomeGround(track) {
+    const cells = track.biomeCells;
+    // Per-biome temporary lists for batching by material.
+    for (const c of cells) {
+      if (c.isRoad) continue;
+      const mat = BIOME_MATS[c.biome] || BIOME_MATS[LAND];
+      // Slight per-cell jitter in height so neighbouring cells of the same
+      // biome don't look like a flat checkerboard.
+      const elevBoost = c.biome === MOUNTAIN ? 1.4
+                      : c.biome === FOREST ? 0.05
+                      : c.biome === WATER ? -0.55
+                      : 0.0;
+      const ground = new THREE.Mesh(tileGeoms.ground, mat);
+      ground.position.set(c.cx, -0.20 + elevBoost, c.cy);
+      this.trackGroup.add(ground);
+
+      // Decorations per biome.
+      if (c.biome === FOREST) {
+        // Place 1–2 trees in the cell, slightly offset.
+        const offs = [
+          { x: -0.7,  z: -0.4 },
+          { x:  0.6,  z:  0.7 },
+        ];
+        for (let i = 0; i < (((c.gx * 7 + c.gy * 13) % 3) >= 1 ? 2 : 1); i++) {
+          const o = offs[i];
+          const trunk = new THREE.Mesh(tileGeoms.trunk, TRUNK_MAT);
+          trunk.position.set(c.cx + o.x, 0.7, c.cy + o.z);
+          this.trackGroup.add(trunk);
+          const foliage = new THREE.Mesh(tileGeoms.foliage, FOLIAGE_MAT);
+          foliage.position.set(c.cx + o.x, 2.1, c.cy + o.z);
+          this.trackGroup.add(foliage);
+        }
+      } else if (c.biome === MOUNTAIN) {
+        const rock = new THREE.Mesh(tileGeoms.rock, ROCK_MAT);
+        // Deterministic small jitter to make the peaks varied.
+        const jx = ((c.gx * 1664525 + c.gy * 1013904223) % 100) / 100 - 0.5;
+        const jz = ((c.gx * 22695477 + c.gy * 89067) % 100) / 100 - 0.5;
+        rock.position.set(c.cx + jx * 0.8, 1.4, c.cy + jz * 0.8);
+        rock.rotation.y = jx * Math.PI;
+        this.trackGroup.add(rock);
+      } else if (c.biome === WATER) {
+        const surf = new THREE.Mesh(
+          tileGeoms.water,
+          new THREE.MeshStandardMaterial({
+            color: 0x4078a0,
+            roughness: 0.05,
+            metalness: 0.4,
+            transparent: true,
+            opacity: 0.85,
+          }),
+        );
+        surf.position.set(c.cx, -0.10, c.cy);
+        this.trackGroup.add(surf);
+      }
+    }
+  }
+
+  // Build one road tile (plate + tile-shape-specific markings).
+  _buildRoadTile(t, mat) {
     const g = new THREE.Group();
     g.position.set(t.cx, 0, t.cy);
     g.rotation.y = t.rotation;
 
-    // Road plate. Slightly below grade so kerbs above sit proud.
-    const plate = new THREE.Mesh(tileGeoms.plate, mat);
-    plate.position.y = 0.05;
+    const plate = new THREE.Mesh(tileGeoms.road, mat);
+    plate.position.y = 0.11;
     g.add(plate);
 
     if (t.type === 'straight') {
-      // Two short white dashes along the centre line.
       for (const z of [-0.9, 0.9]) {
         const dash = new THREE.Mesh(tileGeoms.dash, DASH_MAT);
-        dash.position.set(0, 0.17, z);
+        dash.position.set(0, 0.24, z);
         g.add(dash);
       }
     } else if (t.type === 'corner') {
-      // Tight 90° turn — sweep a thin arc-shaped white marking inside the
-      // cell as the apex line. Built as a few small dashes along an arc.
-      const dashMat = DASH_MAT;
-      const radius = CELL_SIZE * 0.25;
+      const radius = CELL_SIZE * 0.30;
       const arcSteps = 6;
       for (let i = 0; i < arcSteps; i++) {
         const a = (-Math.PI / 2) + (i / arcSteps) * (Math.PI / 2);
         const x = -CELL_SIZE / 2 + radius + Math.cos(a) * radius;
         const z = -CELL_SIZE / 2 + radius + Math.sin(a) * radius;
-        const d = new THREE.Mesh(tileGeoms.dash, dashMat);
-        d.position.set(x, 0.17, z);
+        const d = new THREE.Mesh(tileGeoms.dash, DASH_MAT);
+        d.position.set(x, 0.24, z);
         d.rotation.y = a + Math.PI / 2;
         d.scale.x = 0.5;
         g.add(d);
       }
+    } else if (t.type === 'tee') {
+      // 3-way: dashes on the three open edges.
+      for (const [x, z] of [[0, -0.9], [0.9, 0], [-0.9, 0]]) {
+        const dash = new THREE.Mesh(tileGeoms.dash, DASH_MAT);
+        dash.position.set(x, 0.24, z);
+        dash.rotation.y = (x !== 0) ? Math.PI / 2 : 0;
+        g.add(dash);
+      }
+    } else if (t.type === 'cross') {
+      // Small central plus-marking.
+      for (const ang of [0, Math.PI / 2]) {
+        const dash = new THREE.Mesh(tileGeoms.dash, DASH_MAT);
+        dash.position.set(0, 0.24, 0);
+        dash.rotation.y = ang;
+        dash.scale.x = 0.6;
+        g.add(dash);
+      }
+    } else if (t.type === 'cap') {
+      // dead-end — a single dash perpendicular to the open edge
+      const dash = new THREE.Mesh(tileGeoms.dash, DASH_MAT);
+      dash.position.set(0, 0.24, 0.7);
+      g.add(dash);
     }
-    // (dual / diagonal tiles can be added here later)
 
     return g;
   }

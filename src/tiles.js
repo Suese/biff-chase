@@ -1,134 +1,85 @@
-// Tile system: cell chain → tile placements + derived centerline.
+// Road auto-tiling.
 //
-// Connectors emit a 4-connected chain of grid cells. From that chain we
-// can read each cell's entry edge (= direction from the previous cell)
-// and exit edge (= direction to the next cell), pick a tile shape
-// (straight if edges are opposite, corner if adjacent), and a rotation
-// that maps the canonical orientation onto the observed pair.
+// Each road cell is rendered as ONE tile whose shape and rotation come
+// from which of its four cardinal neighbours are ALSO road cells. This is
+// the standard 4-connected Wang-style auto-tile decision:
 //
-// The centerline polyline (used by physics + cars + minimap) is DERIVED
-// from the cell chain — at every cell we drop the centerline-snap-point
-// that the tile's road-line passes through. For a straight tile this is
-// just the cell centre; for a corner it's still the centre (the renderer
-// draws the apex curve). One Chaikin pass smooths it for nice arcs.
+//   0 neighbours → no road (skipped — should not occur on a closed loop)
+//   1            → cap (rare)
+//   2 opposite   → straight  (N+S → rotation 0, E+W → π/2)
+//   2 adjacent   → corner    (N+E → 0, E+S → π/2, S+W → π, W+N → -π/2)
+//   3            → tee
+//   4            → cross
 //
-// Cells are 4m × 4m.
+// Edge numbering matches terrain.js: 0=N, 1=E, 2=S, 3=W. Cell (gx, gy)
+// has neighbours at (gx, gy-1)=N, (gx+1, gy)=E, (gx, gy+1)=S, (gx-1, gy)=W.
 
-export const CELL_SIZE = 4;
+import { CELL_SIZE, cellToWorld } from './terrain.js';
+export { CELL_SIZE };
 
-// Octilinear edge numbers used elsewhere in the codebase: 0=N (–Y direction
-// in world / game), 1=E (+X), 2=S (+Y), 3=W (–X).
-// For our cell-step logic we use the convention that going from cell (gx,gy)
-// to cell (gx,gy-1) means the SECOND cell was entered from its SOUTH edge
-// (since the line came from below... wait that's backwards). Let me state
-// the convention clearly:
-//   World-Y goes from -Y (north) to +Y (south) in the game's 2D coords.
-//   So if cell B is north of cell A (B.gy = A.gy - 1), then the chain
-//   enters B from its SOUTH edge (the edge B shares with A).
-//
-//   gy decreases → moved NORTH → cell entered through its SOUTH edge.
-//   gy increases → moved SOUTH → cell entered through its NORTH edge.
-//   gx increases → moved EAST   → cell entered through its WEST edge.
-//   gx decreases → moved WEST   → cell entered through its EAST edge.
-function enteredEdge(from, to) {
-  if (to.gy < from.gy) return 2;        // came from south
-  if (to.gy > from.gy) return 0;        // came from north
-  if (to.gx > from.gx) return 3;        // came from west
-  if (to.gx < from.gx) return 1;        // came from east
-  return -1;
-}
-function exitedEdge(from, to) {
-  // Edge of `from` through which we leave toward `to`.
-  if (to.gy < from.gy) return 0;        // leave through north
-  if (to.gy > from.gy) return 2;        // leave through south
-  if (to.gx > from.gx) return 1;        // leave through east
-  if (to.gx < from.gx) return 3;        // leave through west
-  return -1;
-}
-
-// Canonical orientations:
-//   straight  — N↔S: rotation 0      (entry/exit edges 0 & 2)
-//                E↔W: rotation π/2
-//   corner    — N→E (entry 0, exit 1): rotation 0
-//                E→S (entry 1, exit 2): rotation π/2
-//                S→W (entry 2, exit 3): rotation π
-//                W→N (entry 3, exit 0): rotation -π/2
-function pickShape(entryEdge, exitEdge) {
-  if (entryEdge < 0 || exitEdge < 0 || entryEdge === exitEdge) {
-    return { type: 'straight', rotation: 0 };
+function shapeAndRotation(neighbourMask) {
+  // neighbourMask is a 4-bit value: bit0=N, bit1=E, bit2=S, bit3=W
+  const n = (neighbourMask & 1) !== 0;
+  const e = (neighbourMask & 2) !== 0;
+  const s = (neighbourMask & 4) !== 0;
+  const w = (neighbourMask & 8) !== 0;
+  const count = (n + e + s + w);
+  if (count === 4) return { type: 'cross', rotation: 0 };
+  if (count === 3) {
+    // Three branches — rotate so the missing edge points S (rotation 0).
+    if (!s) return { type: 'tee', rotation: 0 };
+    if (!w) return { type: 'tee', rotation: Math.PI / 2 };
+    if (!n) return { type: 'tee', rotation: Math.PI };
+    return { type: 'tee', rotation: -Math.PI / 2 };   // missing E
   }
-  if ((entryEdge + 2) % 4 === exitEdge) {
-    return { type: 'straight', rotation: (entryEdge % 2) * (Math.PI / 2) };
+  if (count === 2) {
+    if (n && s) return { type: 'straight', rotation: 0 };
+    if (e && w) return { type: 'straight', rotation: Math.PI / 2 };
+    if (n && e) return { type: 'corner', rotation: 0 };
+    if (e && s) return { type: 'corner', rotation: Math.PI / 2 };
+    if (s && w) return { type: 'corner', rotation: Math.PI };
+    if (w && n) return { type: 'corner', rotation: -Math.PI / 2 };
   }
-  // Adjacent edges → corner.
-  const map = [
-    { a: 0, b: 1, rot: 0 },
-    { a: 1, b: 2, rot: Math.PI / 2 },
-    { a: 2, b: 3, rot: Math.PI },
-    { a: 3, b: 0, rot: -Math.PI / 2 },
-  ];
-  for (const c of map) {
-    if ((entryEdge === c.a && exitEdge === c.b) || (entryEdge === c.b && exitEdge === c.a)) {
-      return { type: 'corner', rotation: c.rot };
-    }
+  if (count === 1) {
+    if (n) return { type: 'cap', rotation: 0 };
+    if (e) return { type: 'cap', rotation: Math.PI / 2 };
+    if (s) return { type: 'cap', rotation: Math.PI };
+    return { type: 'cap', rotation: -Math.PI / 2 };
   }
   return { type: 'straight', rotation: 0 };
 }
 
-// cells: 4-connected closed chain of {gx, gy, roadType?}
-// Returns:
-//   { placements: [{gx,gy,cx,cy,type,rotation,roadType}],
-//     centerline: [{x,y}],     // closed polyline, one point per cell
-//     widths:     [width],     // per centerline vertex; from per-cell roadWidth
-//   }
-export function buildFromCellChain(cells) {
-  const N = cells.length;
-  if (N < 3) return { placements: [], centerline: [], widths: [] };
-
+// Build road-tile placements from a set of road cells (an array of {gx, gy}).
+// `roadType` is a string used by the renderer to pick a material.
+export function autotileRoad(roadCells, roadType = 'pavement') {
+  const has = new Set(roadCells.map(c => `${c.gx},${c.gy}`));
   const placements = [];
-  const centerline = [];
-  const widths = [];
-
-  for (let i = 0; i < N; i++) {
-    const prev = cells[(i - 1 + N) % N];
-    const cur  = cells[i];
-    const next = cells[(i + 1) % N];
-    const entryEdge = enteredEdge(prev, cur);
-    const exitEdge  = exitedEdge(cur, next);
-    const shape = pickShape(entryEdge, exitEdge);
-    const cx = cur.gx * CELL_SIZE + CELL_SIZE / 2;
-    const cy = cur.gy * CELL_SIZE + CELL_SIZE / 2;
-
+  for (const c of roadCells) {
+    let mask = 0;
+    if (has.has(`${c.gx},${c.gy - 1}`)) mask |= 1;   // N
+    if (has.has(`${c.gx + 1},${c.gy}`)) mask |= 2;   // E
+    if (has.has(`${c.gx},${c.gy + 1}`)) mask |= 4;   // S
+    if (has.has(`${c.gx - 1},${c.gy}`)) mask |= 8;   // W
+    const { type, rotation } = shapeAndRotation(mask);
+    const world = cellToWorld(c.gx, c.gy);
     placements.push({
-      gx: cur.gx,
-      gy: cur.gy,
-      cx, cy,
-      type: shape.type,
-      rotation: shape.rotation,
-      roadType: cur.roadType || 'pavement',
-      entryEdge,
-      exitEdge,
+      gx: c.gx, gy: c.gy,
+      cx: world.x, cy: world.y,
+      type, rotation,
+      roadType,
     });
-
-    centerline.push({ x: cx, y: cy });
-    // Width per cell: roadType drives this.
-    widths.push(roadWidthFor(cur.roadType || 'pavement'));
   }
-
-  return { placements, centerline, widths };
+  return placements;
 }
 
-function roadWidthFor(roadType) {
-  // Pavement is the widest 4-lane racing surface; gravel and ice slightly
-  // narrower for visual variety.
-  if (roadType === 'gravel') return 9.5;
-  if (roadType === 'ice')    return 10.5;
-  return 11;   // pavement
+// Centerline polyline derived from a road-cell chain (one point per cell
+// centre). Cells must already be sorted so consecutive entries are
+// 4-connected.
+export function centerlineFromCells(roadCells) {
+  return roadCells.map(c => cellToWorld(c.gx, c.gy));
 }
 
-// One Chaikin pass on a closed polyline — used to smooth the cell-centre
-// centerline so cars + physics see flowing arcs through the corners
-// instead of sharp 90° elbow joints.
+// One Chaikin smoothing pass on a closed polyline.
 export function chaikinClosed(pts) {
   const out = [];
   const n = pts.length;
@@ -138,14 +89,5 @@ export function chaikinClosed(pts) {
     out.push({ x: 0.75 * p.x + 0.25 * q.x, y: 0.75 * p.y + 0.25 * q.y });
     out.push({ x: 0.25 * p.x + 0.75 * q.x, y: 0.25 * p.y + 0.75 * q.y });
   }
-  return out;
-}
-
-export function expandWidths(widths) {
-  // After a Chaikin pass each input width becomes two output widths (an
-  // 0.75/0.25 mix would be needed for perfect accuracy, but per-vertex
-  // road width changes slowly so simple duplication is fine).
-  const out = [];
-  for (const w of widths) { out.push(w); out.push(w); }
   return out;
 }
