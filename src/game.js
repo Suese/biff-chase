@@ -583,18 +583,16 @@ export class GameRoom {
   }
 
   maybeRespawn(car) {
-    // Respawn at the most recent checkpoint's center, facing forward
-    const ls = getLapData(this.carEntities.get(car.ownerId));
-    if (!ls) return;
-    const cpIdx = (ls.nextCheckpoint - 1 + this.track.checkpoints.length) % this.track.checkpoints.length;
-    const cp = this.track.checkpoints[cpIdx];
-    // angle: tangent direction from this checkpoint to the next
-    const next = this.track.checkpoints[ls.nextCheckpoint];
-    const ang = Math.atan2(next.cy - cp.cy, next.cx - cp.cx);
+    // Respawn at the start/finish line — beginning of the current lap.
+    if (!this.track) return;
+    const start = this.track.checkpoints[0];
+    const next  = this.track.checkpoints[1];
+    if (!start || !next) return;
+    const ang = Math.atan2(next.cy - start.cy, next.cx - start.cx);
     scheduleAfter(2200, () => {
       if (!this.cars.has(car.ownerId)) return;
-      respawnCar(car, cp.cx, cp.cy, ang);
-      this.emitEvent({ type: 'respawn', playerId: car.ownerId, x: cp.cx, y: cp.cy });
+      respawnCar(car, start.cx, start.cy, ang);
+      this.emitEvent({ type: 'respawn', playerId: car.ownerId, x: start.cx, y: start.cy });
     });
   }
 

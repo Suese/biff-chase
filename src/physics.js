@@ -51,8 +51,10 @@ export function buildTrackBodies(world, track) {
       const seg = Matter.Bodies.rectangle(mx, my, len + 2, wallThickness, {
         isStatic: true,
         angle,
-        friction: 0.8,
-        restitution: 0.2,
+        // Frictionless walls — cars slide along them instead of catching.
+        friction: 0,
+        frictionStatic: 0,
+        restitution: 0.05,
         label: 'wall',
         slop: 0.02,
       });
@@ -72,9 +74,10 @@ export function createCarBody(x, y, angle, ownerId, stats) {
     angle,
     density: 0.002,
     frictionAir: 0,
-    friction: 0.05,
-    // Low restitution so walls don't kick the car back hard — instead it
-    // slides along the wall and we spawn sparks.
+    // Frictionless contacts so the car glides along walls (we still get the
+    // collision response — just no sticky friction killing forward motion).
+    friction: 0,
+    frictionStatic: 0,
     restitution: 0.05,
     label: 'car',
     chamfer: { radius: 6 },
@@ -102,15 +105,31 @@ export function refreshCarStats(carBody, upgrades) {
   carBody.health = stats.armor;
 }
 
-// Apply input to a car body for one fixed step.
+// Drift-oriented arcade car model. Key ideas borrowed from top-down racers:
 //
-// Critical unit-conversion: Matter.Body's velocity is in pixels-per-STEP (one
-// 16.66ms physics step). Our stats.maxSpeed / stats.accel are in pixels-per-
-// SECOND for ease of tuning. We pull body.velocity in, scale to per-sec at
-// the top, do all the math in per-sec, then scale back to per-step before
-// calling setVelocity. Wall-collision response in Matter modifies the
-// per-step velocity, which the next stepCar call picks up cleanly because we
-// always re-read at the top.
+//  * Slip angle (lateral velocity as a fraction of total speed) drives a
+//    "drift" coefficient 0..1. The further the car is from pointing where
+//    it's moving, the more committed the drift is.
+//  * Grip is a *function* of drift, not a constant: high grip when slip is
+//    low (car snaps back to straight), much lower grip when slip is high
+//    (drifts maintain themselves — positive-feedback "sticky" drift).
+//  * Steering authority scales UP during a drift so counter-steering feels
+//    powerful — you can fishtail and recover.
+//  * Power oversteer: full throttle near top speed eats a bit of grip, so
+//    flooring it through a corner kicks the rear out.
+//  * Handbrake (Space) collapses grip — instant break-into-drift.
+//  * Throttle pushes along the car's facing direction (NOT the velocity
+//    direction), so while drifting the engine carries you sideways. This is
+//    what makes drift in arcade racers feel right.
+//
+// Matter.js handles wall collisions on top of all of this. setVelocity uses
+// per-step units; our stats are per-second, so we convert at the boundary.
+
+function smoothstep01(a, b, x) {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
 export function stepCar(body, dt) {
   if (!body.alive) {
     body.respawnIn = Math.max(0, body.respawnIn - dt);
@@ -120,57 +139,66 @@ export function stepCar(body, dt) {
   const a = body.angle;
   const fx = Math.cos(a);
   const fy = Math.sin(a);
-  const nx = -fy;       // body-left normal
+  const nx = -fy;
   const ny =  fx;
 
-  // Convert Matter's per-step velocity into per-second axis-aligned speeds.
   const vxSec = body.velocity.x / dt;
   const vySec = body.velocity.y / dt;
+  const totalSpeed = Math.hypot(vxSec, vySec);
   let fwdSpeed = vxSec * fx + vySec * fy;
   let latSpeed = vxSec * nx + vySec * ny;
 
-  const oiledMul = body.oiled > 0 ? 0.4 : 1.0;
+  const oiledMul = body.oiled > 0 ? 0.45 : 1.0;
   const boostMul = body.boost > 0 ? stats.nitroBoost : 1.0;
   const maxSpeed = stats.maxSpeed * boostMul;
 
-  // ---- Throttle / brake / reverse.
+  // Slip-angle ratio: 0 = perfectly aligned, 1 = pure sideways slide. Below
+  // ~0.15 the car snaps straight; above ~0.55 it's a committed drift.
+  const slipFrac = totalSpeed > 30 ? Math.abs(latSpeed) / totalSpeed : 0;
+  const drift = smoothstep01(0.15, 0.55, slipFrac);
+
+  // Throttle / brake — applied along facing.
   if (input.up && !input.down) {
     fwdSpeed += stats.accel * oiledMul * dt;
     if (fwdSpeed > maxSpeed) fwdSpeed = maxSpeed;
   } else if (input.down && !input.up) {
-    fwdSpeed -= stats.brake * 0.6 * oiledMul * dt;
+    fwdSpeed -= stats.brake * 0.55 * oiledMul * dt;
     if (fwdSpeed < -stats.reverse) fwdSpeed = -stats.reverse;
   } else {
-    // Engine braking when off-throttle.
-    fwdSpeed *= Math.pow(0.985, dt * 60);
-  }
-  if (input.brake) {
-    fwdSpeed *= Math.pow(0.88, dt * 60);
+    fwdSpeed *= Math.pow(0.99, dt * 60);     // gentler off-throttle decay
   }
 
-  // ---- Lateral grip.
-  let grip = stats.grip;
-  if (input.brake) grip *= 0.35;
-  if (body.oiled > 0) grip *= 0.4;
-  const latDecay = Math.min(1, grip * dt * 12);
+  // ---- Grip (lateral friction) — the heart of the drift feel.
+  // Base grip is reduced as drift builds (positive feedback), and crushed
+  // by handbrake / oil. Power-oversteer near top speed.
+  let grip = stats.grip * (1.0 - drift * 0.65);
+  if (input.brake) grip *= 0.18;
+  if (body.oiled > 0) grip *= 0.35;
+  if (input.up && fwdSpeed > 0.75 * maxSpeed) grip *= 0.78;
+
+  // Lateral velocity decay — exponential per-step, scaled to dt.
+  const latDecay = Math.min(1, grip * dt * 14);
   latSpeed *= (1 - latDecay);
 
-  // Convert back to per-step before handing to Matter.
+  // Hand back to Matter (per-step units).
   Matter.Body.setVelocity(body, {
     x: (fwdSpeed * fx + latSpeed * nx) * dt,
     y: (fwdSpeed * fy + latSpeed * ny) * dt,
   });
 
-  // Steering. Authority scales with √speed so cars don't spin in place.
-  const speedNorm = Math.min(1, Math.abs(fwdSpeed) / stats.maxSpeed);
-  const steerAuthority = 0.25 + 0.75 * Math.sqrt(speedNorm);
+  // ---- Steering. Authority scales with √speed and gets a meaningful boost
+  // while drifting so counter-steer feels responsive (fishtail recovery).
+  const speedNorm = Math.min(1, totalSpeed / stats.maxSpeed);
+  const baseAuthority = 0.30 + 0.70 * Math.sqrt(speedNorm);
+  const driftBonus = 1.0 + drift * 0.55;
   let steer = (input.left ? -1 : 0) + (input.right ? 1 : 0);
   if (fwdSpeed < -10) steer *= -1;
-  Matter.Body.setAngularVelocity(body, steer * stats.turnSpeed * steerAuthority * oiledMul * dt);
+  const angVel = steer * stats.turnSpeed * baseAuthority * driftBonus * oiledMul;
+  Matter.Body.setAngularVelocity(body, angVel * dt);
 
-  // Cache for snapshots/UI.
   body._fwdSpeed = fwdSpeed;
   body._latSpeed = latSpeed;
+  body._drift = drift;
 
   if (body.boost > 0) body.boost = Math.max(0, body.boost - dt);
   if (body.oiled > 0) body.oiled = Math.max(0, body.oiled - dt);

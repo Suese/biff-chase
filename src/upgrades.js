@@ -48,9 +48,10 @@ export function computeStats(upgrades = {}) {
     reverse:     520 + eng * 60,
     // Aggressively low grip + brisk turn rate so the car is twitchy from the
     // first race. Upgrade tires to tame it.
-    grip:       0.38 + tir * 0.08,
+    grip:       0.55 + tir * 0.10,    // base grip when going straight; drift erodes it
     turnSpeed:  3.6 + tir * 0.40,
-    armor:      100 + arm * 35,
+    armor:      400 + arm * 140,      // ~4× tougher; survives several scrapes
+
     nitroMul:   1.0 + fue * 0.25,
     nitroBoost: 1.45 + eng * 0.05,
   };
