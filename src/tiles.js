@@ -14,8 +14,93 @@
 // Edge numbering matches terrain.js: 0=N, 1=E, 2=S, 3=W. Cell (gx, gy)
 // has neighbours at (gx, gy-1)=N, (gx+1, gy)=E, (gx, gy+1)=S, (gx-1, gy)=W.
 
-import { CELL_SIZE, cellToWorld } from './terrain.js';
+import { CELL_SIZE, GRID_SIZE, cellToWorld, ROAD } from './terrain.js';
 export { CELL_SIZE };
+
+// ------------------------------------------------------------------------
+//   Half-offset output tile system
+// ------------------------------------------------------------------------
+// Each meta-cell is split into 4 quadrants. An OUTPUT tile sits at the
+// corner intersection of 4 meta-cells; it renders the 4 quadrants of the
+// 4 surrounding meta-cells (its NW quadrant = SE quadrant of the NW
+// meta-cell, etc.). Output tiles tile the world cleanly with no overlap.
+//
+// For each pair of adjacent quadrants within a tile, if exactly one is
+// ROAD we emit a WALL along the shared edge. Walls are part of the tile
+// description, not a separate pass — they're authored INTO the tile.
+
+export function buildOutputTiles(metaMap) {
+  const tiles = [];
+  const halfW = (GRID_SIZE * CELL_SIZE) / 2;
+  // Output tile coordinates range from 0..GRID_SIZE inclusive. At cgx=0 or
+  // cgx=GRID_SIZE the tile sits on the world border — those border tiles
+  // still render but their out-of-range corners read as WATER (off the map).
+  for (let cgy = 0; cgy <= GRID_SIZE; cgy++) {
+    for (let cgx = 0; cgx <= GRID_SIZE; cgx++) {
+      const nw = sampleMeta(metaMap, cgx - 1, cgy - 1);
+      const ne = sampleMeta(metaMap, cgx,     cgy - 1);
+      const sw = sampleMeta(metaMap, cgx - 1, cgy);
+      const se = sampleMeta(metaMap, cgx,     cgy);
+      // World position of the corner.
+      const cx = cgx * CELL_SIZE - halfW;
+      const cy = cgy * CELL_SIZE - halfW;
+      // Walls — one per pair of adjacent quadrants with mixed road/non-road.
+      const walls = [];
+      const halfQ = CELL_SIZE / 4;     // distance from tile centre to quadrant boundary
+      const isRoad = (b) => b === ROAD;
+      // NW-NE pair: vertical boundary on the top half (z = -halfQ).
+      if (isRoad(nw) !== isRoad(ne)) {
+        walls.push({ x: cx, y: cy - halfQ, len: CELL_SIZE / 2, axis: 'x' });
+      }
+      // NE-SE pair: horizontal boundary on the right half (x = +halfQ).
+      if (isRoad(ne) !== isRoad(se)) {
+        walls.push({ x: cx + halfQ, y: cy, len: CELL_SIZE / 2, axis: 'y' });
+      }
+      // SE-SW pair: vertical boundary on the bottom half (z = +halfQ).
+      if (isRoad(se) !== isRoad(sw)) {
+        walls.push({ x: cx, y: cy + halfQ, len: CELL_SIZE / 2, axis: 'x' });
+      }
+      // SW-NW pair: horizontal boundary on the left half (x = -halfQ).
+      if (isRoad(sw) !== isRoad(nw)) {
+        walls.push({ x: cx - halfQ, y: cy, len: CELL_SIZE / 2, axis: 'y' });
+      }
+      tiles.push({
+        cgx, cgy,
+        cx, cy,
+        corners: { nw, ne, sw, se },
+        walls,
+      });
+    }
+  }
+  return tiles;
+}
+
+// Out-of-bounds reads as WATER so map borders show ocean.
+function sampleMeta(metaMap, gx, gy) {
+  if (gx < 0 || gx >= GRID_SIZE || gy < 0 || gy >= GRID_SIZE) return 'water';
+  return metaMap[gy][gx];
+}
+
+// Stable hash for "wall present?" toggle so the same seed produces the
+// same wall layout. About 70% of eligible walls actually render; the
+// gaps make sections of the track feel more open.
+function wallPresent(tile, dirIdx) {
+  let h = (tile.cgx + 1009) * 73856093 ^ (tile.cgy + 2003) * 19349663 ^ dirIdx * 83492791;
+  h = (h ^ (h >>> 13)) * 0x5bd1e995;
+  h = h ^ (h >>> 15);
+  return ((h >>> 0) % 100) < 78;
+}
+
+// Re-walk the output tiles to attach a `present` boolean to every wall.
+// Called after buildOutputTiles so callers can iterate `t.walls` and skip
+// invisible ones (or render them as a low kerb instead).
+export function annotateWalls(outputTiles) {
+  for (const t of outputTiles) {
+    for (let i = 0; i < t.walls.length; i++) {
+      t.walls[i].present = wallPresent(t, i);
+    }
+  }
+}
 
 function shapeAndRotation(neighbourMask) {
   // neighbourMask is a 4-bit value: bit0=N, bit1=E, bit2=S, bit3=W

@@ -15,6 +15,7 @@ export const WATER    = 'water';
 export const LAND     = 'land';
 export const FOREST   = 'forest';
 export const MOUNTAIN = 'mountain';
+export const ROAD     = 'road';        // Road is the 5th biome at the meta-grid level.
 
 // ---- Hashing & noise ----------------------------------------------------
 

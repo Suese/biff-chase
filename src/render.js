@@ -649,30 +649,22 @@ export class RallyScene {
       }
     }
 
-    // ---- Road walls. For each road cell, place a wall along every cardinal
-    // boundary that is NOT another road cell. Walls are short concrete barriers
-    // with a red top kerb.
-    const roadSet = new Set();
-    for (const p of track.tilePlacements || []) roadSet.add(`${p.gx},${p.gy}`);
-    for (const p of track.tilePlacements || []) {
-      const dirs = [
-        { dx: 0, dy: -1, rotY: 0,             along: 'x' },
-        { dx: 1, dy: 0,  rotY: Math.PI / 2,   along: 'z' },
-        { dx: 0, dy: 1,  rotY: 0,             along: 'x' },
-        { dx: -1, dy: 0, rotY: Math.PI / 2,   along: 'z' },
-      ];
-      for (const d of dirs) {
-        if (roadSet.has(`${p.gx + d.dx},${p.gy + d.dy}`)) continue;
-        const wall = new THREE.Mesh(tileGeoms.wall, ROAD_WALL_MAT);
-        const wallX = p.cx + d.dx * (CELL_SIZE / 2 - 0.14);
-        const wallZ = p.cy + d.dy * (CELL_SIZE / 2 - 0.14);
-        wall.position.set(wallX, 0.42, wallZ);
-        wall.rotation.y = d.rotY;
+    // ---- Walls come from the half-offset output tiles (track.wallSegments)
+    // rather than being computed per-road-cell. The tile system decides
+    // where walls go based on the 4-corner biome pattern at each tile.
+    if (track.wallSegments?.length) {
+      // Half-tile-length wall and stripe geometry (2 m long, not full cell).
+      const wallGeom = new THREE.BoxGeometry(CELL_SIZE / 2, 0.6, 0.28);
+      const topGeom  = new THREE.BoxGeometry(CELL_SIZE / 2, 0.1, 0.32);
+      for (const w of track.wallSegments) {
+        const rotY = (w.axis === 'y') ? Math.PI / 2 : 0;
+        const wall = new THREE.Mesh(wallGeom, ROAD_WALL_MAT);
+        wall.position.set(w.x, 0.42, w.y);
+        wall.rotation.y = rotY;
         this.trackGroup.add(wall);
-        // Red kerb stripe on top.
-        const top = new THREE.Mesh(tileGeoms.wallTop, ROAD_WALL_STRIPE_MAT);
-        top.position.set(wallX, 0.77, wallZ);
-        top.rotation.y = d.rotY;
+        const top = new THREE.Mesh(topGeom, ROAD_WALL_STRIPE_MAT);
+        top.position.set(w.x, 0.77, w.y);
+        top.rotation.y = rotY;
         this.trackGroup.add(top);
       }
     }
@@ -996,20 +988,27 @@ export class RallyScene {
     this.carFlashUntil.set(playerId, performance.now() + ms);
   }
 
-  // Drop a short black streak on the road behind the rear wheels of a car.
-  // Called by syncCars once per drifting car per frame (rate-limited per car).
-  emitSkidMark(worldX, worldZ, carYaw) {
+  // Drop a short streak on the surface behind a car's rear wheels. Colour
+  // and opacity come from the surface the car is on (asphalt = black,
+  // gravel = tan, ice = pale-blue, grass = dirt-green).
+  emitSkidMark(worldX, worldZ, carYaw, surface = 'pavement') {
     if (this.skidMarks.length >= this.skidMaxCount) {
-      // Recycle the oldest.
       const oldest = this.skidMarks.shift();
       this.skidGroup.remove(oldest.mesh);
       this._disposeNode(oldest.mesh);
     }
+    const palette = ({
+      pavement: { color: 0x080808, opacity: 0.55 },
+      gravel:   { color: 0xc6a06a, opacity: 0.45 },
+      ice:      { color: 0xd4f0ff, opacity: 0.55 },
+      land:     { color: 0x4a5a2c, opacity: 0.40 },
+      forest:   { color: 0x3a2614, opacity: 0.40 },
+    })[surface] || { color: 0x080808, opacity: 0.55 };
     const geom = new THREE.PlaneGeometry(0.55, 0.18);
     const mat = new THREE.MeshBasicMaterial({
-      color: 0x080808,
+      color: palette.color,
       transparent: true,
-      opacity: 0.55,
+      opacity: palette.opacity,
       depthWrite: false,
     });
     const mesh = new THREE.Mesh(geom, mat);
@@ -1049,12 +1048,11 @@ export class RallyScene {
         const tNow = performance.now() / 1000;
         if (tNow - (g._lastSkidT || 0) > 0.045) {
           g._lastSkidT = tNow;
-          // Body-space rear wheel offsets → world space via the car's yaw.
           const cosA = Math.cos(car.a), sinA = Math.sin(car.a);
           for (const off of g._rearWheelOffsets) {
             const wx = car.x + off.x * cosA - off.z * sinA;
             const wz = car.y + off.x * sinA + off.z * cosA;
-            this.emitSkidMark(wx, wz, car.a);
+            this.emitSkidMark(wx, wz, car.a, car.surface);
           }
         }
       }

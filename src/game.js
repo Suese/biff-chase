@@ -10,6 +10,7 @@ import Matter from 'matter-js';
 import {
   createWorld, createCarBody, refreshCarStats,
   stepCar, clampToTrack, dealDamage, respawnCar, carSnapshot, applyCarSnapshot,
+  buildWallBodies,
   FIXED_DT, CAR_LENGTH, PICKUP_R, MINE_R, OIL_R,
 } from './physics.js';
 import { generateTrack, gridSpawnPositions } from './track.js';
@@ -100,6 +101,26 @@ export class GameRoom {
     this.emitEvent({ type: 'log', text: `${name} joined.` });
   }
 
+  // Sample the surface type at a world-space (x, y) point. Uses the track's
+  // metaMap; out-of-range returns 'pavement' as a safe default.
+  _surfaceAtWorld(x, y) {
+    const t = this.track;
+    if (!t || !t.metaMap) return 'pavement';
+    const half = (t.gridSize * t.cellSize) / 2;
+    const gx = Math.floor((x + half) / t.cellSize);
+    const gy = Math.floor((y + half) / t.cellSize);
+    if (gx < 0 || gx >= t.gridSize || gy < 0 || gy >= t.gridSize) return 'pavement';
+    const biome = t.metaMap[gy][gx];
+    if (biome === 'road') {
+      // Use the matching road tile's surface type if available.
+      const placement = (t.tilePlacements || []).find(p => p.gx === gx && p.gy === gy);
+      return placement?.roadType || 'pavement';
+    }
+    if (biome === 'forest') return 'forest';
+    if (biome === 'land')   return 'land';
+    return 'pavement';
+  }
+
   // Spawn a single car at the back of the current grid. Used by beginRace and
   // by addPlayer for late joiners.
   _spawnCarForPlayer(playerId, playerName) {
@@ -162,8 +183,11 @@ export class GameRoom {
       this.engine = null;
     }
     this.engine = createWorld();
-    // No wall bodies — the track is a CSG union of trapezoid tiles and we
-    // clamp each car to it per fixed step (see physics.clampToTrack).
+    // Walls authored INTO the tile system become Matter static bodies so
+    // cars genuinely collide with them.
+    if (this.track.wallSegments?.length) {
+      buildWallBodies(this.engine.world, this.track.wallSegments);
+    }
 
     // Wipe ECS world and rebuild from current players + track.
     for (const e of [...this.carEntities.values()])    this.ecs.removeEntity(e);
@@ -411,7 +435,14 @@ export class GameRoom {
   }
 
   fixedStep(dt) {
-    // 1. Step each car's controller (input → forces, lateral friction)
+    // 1a. Update each car's `surface` from the underlying meta-cell so
+    // stepCar uses the right grip / top-speed multiplier this step.
+    eachCar(this.ecs, (e) => {
+      const body = getRigidBody(e);
+      if (body) body.surface = this._surfaceAtWorld(body.position.x, body.position.y);
+    });
+
+    // 1b. Step each car's controller (input → forces, lateral friction)
     eachCar(this.ecs, (e) => stepCar(getRigidBody(e), dt));
 
     // 2. Run Matter physics step

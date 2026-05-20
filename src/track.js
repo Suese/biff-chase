@@ -18,7 +18,8 @@ import {
   generateBiomeMap, pickCheckpoints, carveRoad,
   cellToWorld, WATER, LAND, FOREST, MOUNTAIN,
 } from './terrain.js';
-import { flatRoadPlacements, centerlineFromCells, dilateRoadCells } from './tiles.js';
+import { flatRoadPlacements, centerlineFromCells, dilateRoadCells, buildOutputTiles, annotateWalls } from './tiles.js';
+import { ROAD } from './terrain.js';
 
 export function generateTrack(seed) {
   const rng = mulberry32(seed >>> 0);
@@ -151,21 +152,40 @@ export function generateTrack(seed) {
     maxX:  WORLD_HALF, maxY:  WORLD_HALF,
   };
 
-  // 11. Biome cell data for the renderer (per cell). isRoad is true when
-  // the DILATED road area covers the cell (so the renderer skips biome
-  // decoration for it).
+  // 11. Biome cell data + the unified metaMap (with road as a 5th biome)
+  // that the output-tile system reads from.
   const biomeCells = [];
+  const metaMap = new Array(GRID_SIZE);
   for (let gy = 0; gy < GRID_SIZE; gy++) {
+    metaMap[gy] = new Array(GRID_SIZE);
     for (let gx = 0; gx < GRID_SIZE; gx++) {
       const isRoad = roadCellSet.has(`${gx},${gy}`);
+      const baseBiome = biomeMap.map[gy][gx];
+      const effective = isRoad ? ROAD : baseBiome;
+      metaMap[gy][gx] = effective;
       const world = cellToWorld(gx, gy);
       biomeCells.push({
         gx, gy,
         cx: world.x, cy: world.y,
-        biome: biomeMap.map[gy][gx],
+        biome: baseBiome,
         elev: biomeMap.elevation[gy][gx],
         isRoad,
       });
+    }
+  }
+
+  // 12. Half-offset output tiles — the actual rendered surface. Walls
+  // belong to the tiles, not as a separate pass. annotateWalls() picks
+  // which walls actually render/collide so sections of the track have
+  // gaps instead of being continuous walls.
+  const outputTiles = buildOutputTiles(metaMap);
+  annotateWalls(outputTiles);
+
+  // Flatten the present walls so physics can build static bodies from them.
+  const wallSegments = [];
+  for (const t of outputTiles) {
+    for (const w of t.walls) {
+      if (w.present) wallSegments.push(w);
     }
   }
 
@@ -176,6 +196,9 @@ export function generateTrack(seed) {
     tiles: phyTiles,
     tilePlacements: placementsRaw,
     biomeCells,
+    outputTiles,
+    wallSegments,
+    metaMap,
     gridSize: GRID_SIZE,
     cellSize: CELL_SIZE,
     inner,

@@ -39,6 +39,30 @@ export function createWorld() {
   return engine;
 }
 
+// Build Matter static bodies for the track's wall segments. wallSegments
+// is the array on the track object (already filtered to "present" walls).
+// Each segment has { x, y, len, axis } in metres.
+export function buildWallBodies(world, wallSegments) {
+  const bodies = [];
+  const thickness = 0.35;
+  for (const w of wallSegments) {
+    let bw, bh;
+    if (w.axis === 'x') { bw = w.len; bh = thickness; }
+    else                { bw = thickness; bh = w.len; }
+    const body = Matter.Bodies.rectangle(w.x, w.y, bw, bh, {
+      isStatic: true,
+      friction: 0,
+      frictionStatic: 0,
+      restitution: 0.1,
+      label: 'wall',
+      slop: 0.005,
+    });
+    bodies.push(body);
+  }
+  Matter.Composite.add(world, bodies);
+  return bodies;
+}
+
 export function buildTrackBodies(world, track) {
   const bodies = [];
   const wallThickness = 0.8;   // 0.8 m thick barrier
@@ -155,7 +179,9 @@ export function stepCar(body, dt) {
 
   const oiledMul = body.oiled > 0 ? 0.45 : 1.0;
   const boostMul = body.boost > 0 ? stats.nitroBoost : 1.0;
-  const maxSpeed = stats.maxSpeed * boostMul;
+  // Surface modifier — multiplies grip and top speed.
+  const surfMod = surfaceModifiers(body.surface || SURFACE_PAVEMENT);
+  const maxSpeed = stats.maxSpeed * boostMul * surfMod.speedMul;
 
   // Slip-angle ratio: 0 = perfectly aligned, 1 = pure sideways slide. Below
   // ~0.15 the car snaps straight; above ~0.55 it's a committed drift.
@@ -184,8 +210,8 @@ export function stepCar(body, dt) {
   const latFront = latSpeed + omegaSec * halfWB;
   const latRear  = latSpeed - omegaSec * halfWB;
 
-  let gripF = stats.grip * 1.30 * (1.0 - drift * 0.25);
-  let gripR = stats.grip * 0.75 * (1.0 - drift * 0.65);
+  let gripF = stats.grip * 1.30 * surfMod.gripMul * (1.0 - drift * 0.25);
+  let gripR = stats.grip * 0.75 * surfMod.gripMul * (1.0 - drift * 0.65);
   if (input.brake) gripR *= 0.18;                                 // handbrake
   if (input.up && fwdSpeed > 0.5 * maxSpeed) gripR *= 0.70;       // power oversteer
   if (body.oiled > 0) { gripF *= 0.40; gripR *= 0.40; }
@@ -342,6 +368,7 @@ export function carSnapshot(body) {
     alive: body.alive,
     respawnIn: body.respawnIn,
     drift: body._drift || 0,
+    surface: body.surface || 'pavement',
   };
 }
 
