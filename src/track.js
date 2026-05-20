@@ -46,8 +46,22 @@ export function generateTrack(seed) {
     for (let y = R - 1; y >= -R + 1; y--) roadCells.push({ gx: cx - R, gy: cy + y });
   }
 
-  // 4. Dilate the road into a multi-cell-wide area. Width varies along the
-  // path (1..3 cell radius → 3..7 tiles wide).
+  // 4. Pick a START INDEX along the carved path that:
+  //    a) has at least 3 cells of straight axial road ahead;
+  //    b) sits far enough from the grid edge that a 6×5 start zone fits.
+  // Then rotate roadCells so the start cell is at index 0.
+  const startIdx = findStartIndex(roadCells);
+  roadCells = roadCells.slice(startIdx).concat(roadCells.slice(0, startIdx));
+
+  // Establish the start direction (axial). roadCells[0] → roadCells[1].
+  const startCell = roadCells[0];
+  const nextCell  = roadCells[1] || roadCells[0];
+  const fwdX = Math.sign(nextCell.gx - startCell.gx);
+  const fwdY = Math.sign(nextCell.gy - startCell.gy);
+  const perpX = -fwdY;
+  const perpY = fwdX;
+
+  // 5. Dilate the road into a multi-cell-wide area.
   const widthPhase = rng() * Math.PI * 2;
   const widthFreq = 2 + Math.floor(rng() * 3);
   const radiusFor = (i) => {
@@ -58,6 +72,23 @@ export function generateTrack(seed) {
   };
   const { set: roadCellSet, cells: dilatedCells } = dilateRoadCells(roadCells, radiusFor);
 
+  // 5b. Force the START ZONE — a 6-cell-wide × 5-cell-deep axially-aligned
+  // patch of road centred on the start cell. Guarantees that 8 cars
+  // arranged in 4 columns × 2 rows behind the start line all sit on road
+  // tiles, regardless of how thin or curvy the road is elsewhere.
+  for (let p = -3; p <= 2; p++) {           // 6 cells wide (perpendicular)
+    for (let f = -3; f <= 1; f++) {         // 5 cells deep (along forward)
+      const gx = startCell.gx + fwdX * f + perpX * p;
+      const gy = startCell.gy + fwdY * f + perpY * p;
+      if (gx < 0 || gx >= GRID_SIZE || gy < 0 || gy >= GRID_SIZE) continue;
+      const k = `${gx},${gy}`;
+      if (!roadCellSet.has(k)) {
+        roadCellSet.add(k);
+        dilatedCells.push({ gx, gy });
+      }
+    }
+  }
+
   // 5. Auto-tile the road area + bake wall segments from non-road neighbours.
   const tilePlacements = autotileRoad(dilatedCells, 'pavement');
   for (const p of tilePlacements) {
@@ -67,17 +98,11 @@ export function generateTrack(seed) {
   }
   const wallSegments = wallSegmentsFromTiles(tilePlacements);
 
-  // 6. Start tile = the first road cell (along the original carved path).
-  // Facing direction = vector from start cell toward the next cell on the
-  // carved path so the car points down the road.
-  const startCell = roadCells[0];
-  const nextCell  = roadCells[1] || roadCells[0];
+  // 6. Start tile = roadCells[0] (after the rotation above). Facing
+  // direction = the axial fwd vector computed earlier.
   const startWorld = cellToWorld(startCell.gx, startCell.gy);
-  const tx = nextCell.gx - startCell.gx;
-  const ty = nextCell.gy - startCell.gy;
-  const tLen = Math.hypot(tx, ty) || 1;
-  const startTangent = { x: tx / tLen, y: ty / tLen };
-  const startNormal  = { x: -startTangent.y, y: startTangent.x };
+  const startTangent = { x: fwdX, y: fwdY };
+  const startNormal  = { x: perpX, y: perpY };
 
   // 7. Lap checkpoints — 8 specific tiles along the carved path. A car
   // "hits" a checkpoint by entering its cell; no segment intersection
@@ -154,17 +179,20 @@ export function generateTrack(seed) {
 
 // Spawn the 4-wide grid behind the start cell along the road's incoming
 // direction (-tangent). All distances in metres.
+// Spawn 8 cars in a 4-wide × 2-deep grid behind the start cell. All slots
+// sit on road tiles thanks to the start-zone enforcement in generateTrack.
 export function gridSpawnPositions(track, count) {
   const { start } = track;
   const slots = [];
   const COLS = 4;
-  const colSpacing = 3.5;
-  const rowSpacing = 6;
+  const colSpacing = 3.5;          // 14 m total span across 4 cars
+  const rowSpacing = 5.5;           // ~1.5 cells of forward depth per row
+  const firstRowBack = 6;           // first row 6 m back from start cell centre
   const colOffset = -(COLS - 1) / 2;
   for (let i = 0; i < count; i++) {
     const colIdx = i % COLS;
     const rowIdx = Math.floor(i / COLS);
-    const back = -rowSpacing * (rowIdx + 1);
+    const back = -(firstRowBack + rowSpacing * rowIdx);
     const side = (colOffset + colIdx) * colSpacing;
     const x = start.x + start.tx * back + start.nx * side;
     const y = start.y + start.ty * back + start.ny * side;
@@ -172,4 +200,27 @@ export function gridSpawnPositions(track, count) {
     slots.push({ x, y, angle });
   }
   return slots;
+}
+
+// Find an index along the road such that the next 3 cells continue in the
+// same axial direction AND the cell is at least 4 cells away from any grid
+// edge (so the 6×5 start zone fits). Returns 0 on failure.
+function findStartIndex(roadCells) {
+  const margin = 4;
+  const N = roadCells.length;
+  for (let i = 0; i < N; i++) {
+    const a = roadCells[i];
+    const b = roadCells[(i + 1) % N];
+    const c = roadCells[(i + 2) % N];
+    const d = roadCells[(i + 3) % N];
+    const dx = b.gx - a.gx;
+    const dy = b.gy - a.gy;
+    if (Math.abs(dx) + Math.abs(dy) !== 1) continue;
+    if (c.gx - b.gx !== dx || c.gy - b.gy !== dy) continue;
+    if (d.gx - c.gx !== dx || d.gy - c.gy !== dy) continue;
+    if (a.gx < margin || a.gx >= GRID_SIZE - margin) continue;
+    if (a.gy < margin || a.gy >= GRID_SIZE - margin) continue;
+    return i;
+  }
+  return 0;
 }
