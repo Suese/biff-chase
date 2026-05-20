@@ -63,6 +63,28 @@ export function buildWallBodies(world, wallSegments) {
   return bodies;
 }
 
+// ---- Per-surface physics modifiers --------------------------------------
+//
+// The car's body carries a `surface` field written by game.js each step
+// from the underlying meta-cell's biome. Each surface modifies grip and
+// top-speed, and tells the renderer how to colour skid marks.
+
+export const SURFACE_PAVEMENT = 'pavement';
+export const SURFACE_GRAVEL   = 'gravel';
+export const SURFACE_ICE      = 'ice';
+export const SURFACE_LAND     = 'land';      // off-road grass
+export const SURFACE_FOREST   = 'forest';    // off-road forest floor
+
+export function surfaceModifiers(surface) {
+  switch (surface) {
+    case SURFACE_GRAVEL: return { gripMul: 0.65, speedMul: 0.90, skidColor: 0xc6a06a, skidOpacity: 0.45 };
+    case SURFACE_ICE:    return { gripMul: 0.25, speedMul: 0.95, skidColor: 0xd4f0ff, skidOpacity: 0.55 };
+    case SURFACE_LAND:   return { gripMul: 0.55, speedMul: 0.55, skidColor: 0x4a5a2c, skidOpacity: 0.40 };
+    case SURFACE_FOREST: return { gripMul: 0.45, speedMul: 0.40, skidColor: 0x3a2614, skidOpacity: 0.40 };
+    default:             return { gripMul: 1.00, speedMul: 1.00, skidColor: 0x080808, skidOpacity: 0.55 };
+  }
+}
+
 // ---------- Cars ----------
 
 export function createCarBody(x, y, angle, ownerId, stats) {
